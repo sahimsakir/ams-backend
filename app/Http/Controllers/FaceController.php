@@ -1,0 +1,122 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Services\FaceProof;
+use App\Services\Workflow;
+use Carbon\CarbonImmutable;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
+
+class FaceController extends Controller
+{
+    private function view(object $c): array
+    {
+        $steps = json_decode($c->steps, true);
+
+        return ['id' => $c->id, 'step' => $c->step, 'total' => count($steps), 'pose' => $steps[$c->step] ?? null, 'nonce' => $c->nonce, 'complete' => (bool) $c->completed_at, 'expires_at' => CarbonImmutable::parse($c->expires_at)->utc()->toISOString()];
+    }
+
+    public function start(Request $r)
+    {
+        $d = $r->validate(['purpose' => 'required|in:enroll,in,out', 'consent' => 'required|accepted']);
+
+        return DB::transaction(function () use ($r, $d) {
+            $uid = $r->user()->id;
+            DB::table('users')->where('id', $uid)->lockForUpdate()->first();
+            $profile = DB::table('face_profiles')->where('user_id', $uid)->first();
+            if ($d['purpose'] === 'enroll') {
+                abort_if($profile && $profile->verification_version >= 2, 409, 'Already enrolled. Ask an owner to reset your profile if needed.');
+            } else {
+                abort_unless($profile && $profile->verification_version >= 2, 422, 'Complete your own guided face enrollment first.');
+            }
+            // Starting again revokes old challenges, including completed but unused ones.
+            DB::table('face_challenges')->where('user_id', $uid)->whereNull('consumed_at')->update(['expires_at' => now()]);
+            $poses = ['left', 'right', 'up', 'down'];
+            for ($i = count($poses) - 1; $i > 0; $i--) {
+                $j = random_int(0, $i);
+                [$poses[$i], $poses[$j]] = [$poses[$j], $poses[$i]];
+            }
+            $steps = array_merge(['front'], $d['purpose'] === 'enroll' ? $poses : array_slice($poses, 0, 2), ['blink', 'front']);
+            $state = ['templates' => [], 'hashes' => [], 'baseline' => null, 'distance' => 0];
+            if ($profile) {
+                $known = json_decode(Crypt::decryptString($profile->embedding), true);
+                $state['known'] = $profile->verification_version >= 2 ? $known['templates'] : [$known];
+            }
+            $id = (string) Str::uuid();
+            DB::table('face_challenges')->insert(['id' => $id, 'user_id' => $uid, 'purpose' => $d['purpose'], 'steps' => json_encode($steps), 'nonce' => Str::random(48), 'profile_hash' => FaceProof::profileHash($profile), 'state' => Crypt::encryptString(json_encode($state)), 'expires_at' => now()->addMinutes(10), 'created_at' => now(), 'updated_at' => now()]);
+
+            return $this->view(DB::table('face_challenges')->where('id', $id)->first());
+        });
+    }
+
+    public function step(Request $r, string $id)
+    {
+        $d = $r->validate(['nonce' => 'required|string', 'frames' => 'required|array|min:4|max:16', 'frames.*' => 'required|file|mimes:jpeg|max:512']);
+
+        return DB::transaction(function () use ($r, $id, $d) {
+            $uid = $r->user()->id;
+            DB::table('users')->where('id', $uid)->lockForUpdate()->first();
+            $c = DB::table('face_challenges')->where('id', $id)->where('user_id', $uid)->lockForUpdate()->first();
+            abort_unless($c, 404);
+            abort_if($c->consumed_at || $c->completed_at || CarbonImmutable::parse($c->expires_at)->isPast(), 422, 'Camera session expired. Restart the camera.');
+            abort_unless(hash_equals($c->nonce, $d['nonce']), 409, 'This step was already submitted. Restart the camera.');
+            abort_unless($c->profile_hash === FaceProof::profileHash(DB::table('face_profiles')->where('user_id', $uid)->first()), 422, 'Profile changed. Restart the camera.');
+            abort_if(CarbonImmutable::parse($c->updated_at)->diffInMilliseconds(now(), false) < 700, 422, 'Follow the live camera prompt before submitting.');
+            $state = json_decode(Crypt::decryptString($c->state), true);
+            $steps = json_decode($c->steps, true);
+            $pose = $steps[$c->step];
+            $hashes = array_map(fn ($f) => hash_file('sha256', $f->path()), $r->file('frames'));
+            abort_if(count(array_unique($hashes)) !== count($hashes) || array_intersect($hashes, $state['hashes']), 422, 'Repeated or frozen frames detected. Use your live camera.');
+            $http = Http::timeout(90)->withHeaders(['X-Service-Key' => config('ams.face_key')]);
+            foreach ($r->file('frames') as $i => $f) {
+                $http->attach('frames', file_get_contents($f->path()), "frame-$i.jpg");
+            }
+            try {
+                $response = $http->post(config('ams.face_url').'/verify-step', ['pose' => $pose, 'baseline' => json_encode($state['baseline']), 'known' => json_encode($state['known'] ?? $state['templates']), 'threshold' => (string) config('ams.threshold')]);
+            } catch (\Throwable $e) {
+                abort(503, 'Face service unavailable. Retry this step.');
+            }
+            abort_if($response->serverError(), 503, 'Face service unavailable. Retry this step.');
+            abort_unless($response->successful(), 422, 'Step not verified. Keep one face well lit, follow the prompt and retry.');
+            $v = $response->json();
+            $vector = $v['embedding'] ?? null;
+            abort_unless(is_array($vector) && count($vector) === 128 && collect($vector)->every(fn ($n) => is_numeric($n) && is_finite((float) $n)) && isset($v['baseline']['yaw'], $v['baseline']['pitch'], $v['baseline']['ear']) && is_numeric($v['distance'] ?? null) && is_finite((float) $v['distance']), 503, 'Invalid face service response.');
+            abort_unless(collect($v['baseline'])->every(fn ($n) => is_numeric($n) && is_finite((float) $n)), 503, 'Invalid face service response.');
+            abort_if($v['distance'] < 0 || $v['distance'] > config('ams.threshold'), 422, 'Face does not match your profile.');
+            $state['baseline'] ??= $v['baseline'];
+            $state['templates'][] = $vector;
+            // Even enrollment stays bound to its initial face throughout all steps.
+            $state['known'] ??= [$vector];
+            $state['distance'] = max($state['distance'], $v['distance']);
+            $state['hashes'] = array_merge($state['hashes'], $hashes);
+            $photo = $c->photo;
+            if ($c->step === 0) {
+                $photo = $r->file('frames')[0]->store('face-challenges', 'local');
+            }
+            $complete = $c->step + 1 === count($steps);
+            DB::table('face_challenges')->where('id', $id)->update(['state' => Crypt::encryptString(json_encode($state)), 'photo' => $photo, 'step' => $c->step + 1, 'nonce' => Str::random(48), 'updated_at' => now(), 'completed_at' => $complete ? now() : null, 'expires_at' => $complete ? now()->addMinutes(2) : $c->expires_at]);
+
+            return $this->view(DB::table('face_challenges')->where('id', $id)->first());
+        });
+    }
+
+    public function enroll(Request $r)
+    {
+        $d = $r->validate(['challenge_id' => 'required|uuid']);
+
+        return DB::transaction(function () use ($r, $d) {
+            $uid = $r->user()->id;
+            DB::table('users')->where('id', $uid)->lockForUpdate()->first();
+            $c = FaceProof::consume($uid, $d['challenge_id'], 'enroll');
+            abort_if(DB::table('face_profiles')->where('user_id', $uid)->where('verification_version', '>=', 2)->exists(), 409, 'Already enrolled.');
+            DB::table('face_profiles')->updateOrInsert(['user_id' => $uid], ['embedding' => Crypt::encryptString(json_encode(['templates' => $c->decoded['templates']])), 'verification_version' => 2, 'enrolled_by' => $uid, 'created_at' => now(), 'updated_at' => now()]);
+            Workflow::audit($uid, 'face.self_enrolled', (string) $uid);
+
+            return ['message' => 'Your face is enrolled. You can now check in.', 'face_enrolled' => true];
+        });
+    }
+}

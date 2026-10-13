@@ -1,0 +1,44 @@
+<?php
+
+namespace App\Services;
+
+use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
+
+class FaceProof
+{
+    public static function profileHash(?object $profile): ?string
+    {
+        return $profile ? hash('sha256', $profile->embedding) : null;
+    }
+
+    // Call inside a transaction, after locking the user. The same lock order is used everywhere.
+    public static function consume(int $uid, string $id, string $purpose): object
+    {
+        $c = DB::table('face_challenges')->where('id', $id)->where('user_id', $uid)->lockForUpdate()->first();
+        abort_unless($c && $c->purpose === $purpose, 422, 'Invalid camera verification. Start again.');
+        abort_if($c->consumed_at || ! $c->completed_at || CarbonImmutable::parse($c->expires_at)->isPast(), 422, 'Camera verification is incomplete, expired or already used. Start again.');
+        $profile = DB::table('face_profiles')->where('user_id', $uid)->first();
+        abort_unless($c->profile_hash === self::profileHash($profile), 422, 'Face profile changed. Start again.');
+        abort_if($purpose !== 'enroll' && (! $profile || $profile->verification_version < 2), 422, 'Complete your face enrollment first.');
+        DB::table('face_challenges')->where('id', $id)->update(['consumed_at' => now()]);
+        $c->decoded = json_decode(Crypt::decryptString($c->state), true);
+
+        return $c;
+    }
+
+    public static function attendance(?object $row): ?object
+    {
+        if (! $row) {
+            return null;
+        }
+        foreach (['check_in', 'check_out'] as $key) {
+            $row->$key = $row->$key ? CarbonImmutable::parse($row->$key, 'UTC')->utc()->toISOString() : null;
+        }
+        // Never expose private storage paths or matching scores in attendance JSON.
+        unset($row->in_photo, $row->out_photo, $row->in_distance, $row->out_distance);
+
+        return $row;
+    }
+}

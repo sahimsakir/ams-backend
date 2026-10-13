@@ -1,0 +1,206 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Models\User;
+use App\Services\FaceProof;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
+use Tests\TestCase;
+
+class FaceChallengeTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private User $user;
+
+    private int $serviceStatus = 200;
+
+    private ?array $serviceBody = null;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        config(['app.key' => 'base64:'.base64_encode(str_repeat('a', 32))]);
+        Storage::fake('local');
+        Http::preventStrayRequests();
+        Http::fake(fn () => Http::response($this->serviceBody ?? ['embedding' => array_fill(0, 128, 0.0), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => 0], $this->serviceStatus));
+        $this->user = User::create(['name' => 'Self', 'email' => 'self@example.com', 'password' => 'secure-password-123', 'role' => 'employee', 'active' => true]);
+        $this->signIn($this->user);
+    }
+
+    private function signIn(User $u): void
+    {
+        $token = bin2hex(random_bytes(32));
+        DB::table('access_tokens')->insert(['user_id' => $u->id, 'token_hash' => hash('sha256', $token), 'expires_at' => now()->addHour()]);
+        $this->withToken($token);
+    }
+
+    private function start(string $purpose = 'enroll'): array
+    {
+        return $this->postJson('/api/face/challenges', ['purpose' => $purpose, 'consent' => true])->assertOk()->json();
+    }
+
+    private function frames(): array
+    {
+        $frames = [];
+        for ($i = 0; $i < 4; $i++) {
+            $f = UploadedFile::fake()->image('capture.jpg');
+            file_put_contents($f->path(), random_bytes(16), FILE_APPEND);
+            $frames[] = $f;
+        }
+
+        return $frames;
+    }
+
+    private function step(array $c, ?array $frames = null)
+    {
+        $this->travel(2)->seconds();
+
+        return $this->post('/api/face/challenges/'.$c['id'].'/step', ['nonce' => $c['nonce'], 'frames' => $frames ?? $this->frames()], ['Accept' => 'application/json']);
+    }
+
+    private function complete(string $purpose = 'enroll'): array
+    {
+        $c = $this->start($purpose);
+        while (! $c['complete']) {
+            $c = $this->step($c)->assertOk()->json();
+        }
+
+        return $c;
+    }
+
+    private function enroll(): void
+    {
+        $c = $this->complete();
+        $this->postJson('/api/face/enroll', ['challenge_id' => $c['id']])->assertOk();
+    }
+
+    public function test_all_directions_are_required_and_user_enrolls_self(): void
+    {
+        $c = $this->start();
+        $steps = json_decode(DB::table('face_challenges')->where('id', $c['id'])->value('steps'), true);
+        $this->assertCount(7, $steps);
+        foreach (['front', 'left', 'right', 'up', 'down', 'blink'] as $pose) {
+            $this->assertContains($pose, $steps);
+        }
+        $this->postJson('/api/face/enroll', ['challenge_id' => $c['id']])->assertUnprocessable();
+        while (! $c['complete']) {
+            $c = $this->step($c)->assertOk()->json();
+        }
+        $this->postJson('/api/face/enroll', ['challenge_id' => $c['id']])->assertOk()->assertJsonPath('face_enrolled', true);
+        $this->assertDatabaseHas('face_profiles', ['user_id' => $this->user->id, 'enrolled_by' => $this->user->id, 'verification_version' => 2]);
+        $this->getJson('/api/me')->assertJsonPath('face_enrolled', true);
+        $this->postJson('/api/face/enroll', ['challenge_id' => $c['id']])->assertUnprocessable();
+        $this->postJson('/api/face/challenges', ['purpose' => 'enroll', 'consent' => true])->assertStatus(409);
+    }
+
+    public function test_attendance_requires_enrollment_and_completed_camera_proof(): void
+    {
+        $this->postJson('/api/face/challenges', ['purpose' => 'in', 'consent' => true])->assertUnprocessable();
+        $this->post('/api/attendance', ['action' => 'in', 'consent' => true, 'photo' => $this->frames()[0]], ['Accept' => 'application/json'])->assertUnprocessable();
+        $c = $this->complete();
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->assertDatabaseCount('attendances', 0);
+    }
+
+    public function test_completed_proof_is_bound_to_owner_purpose_and_single_use(): void
+    {
+        $this->enroll();
+        $c = $this->complete('in');
+        $other = User::create(['name' => 'Other', 'email' => 'other@example.com', 'password' => 'secure-password-123', 'role' => 'owner', 'active' => true]);
+        $this->signIn($other);
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->signIn($this->user);
+        $this->postJson('/api/attendance', ['action' => 'out', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $response = $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
+        $this->assertMatchesRegularExpression('/T.*Z$/', $response->json('attendance.check_in'));
+        $this->assertArrayNotHasKey('in_photo', $response->json('attendance'));
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->assertDatabaseCount('attendances', 1);
+    }
+
+    public function test_frozen_frames_and_stale_nonce_do_not_advance_step(): void
+    {
+        $c = $this->start();
+        $frames = $this->frames();
+        $this->step($c, array_fill(0, 4, $frames[0]))->assertUnprocessable();
+        Http::assertNothingSent();
+        $next = $this->step($c, $frames)->assertOk()->json();
+        $this->step($c)->assertStatus(409);
+        $this->step($next, $frames)->assertUnprocessable();
+        $this->assertDatabaseHas('face_challenges', ['id' => $c['id'], 'step' => 1]);
+    }
+
+    public function test_expiry_and_restart_invalidate_old_challenge(): void
+    {
+        $old = $this->start();
+        $c = $this->start();
+        $this->step($old)->assertUnprocessable();
+        $this->travel(11)->minutes();
+        $this->step($c)->assertUnprocessable();
+        Http::assertNothingSent();
+    }
+
+    public function test_reset_revokes_pending_attendance_proof(): void
+    {
+        $this->enroll();
+        $c = $this->complete('in');
+        $this->user->update(['role' => 'owner']);
+        $this->deleteJson('/api/users/'.$this->user->id.'/face')->assertOk();
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->getJson('/api/me')->assertJsonPath('face_enrolled', false);
+    }
+
+    public function test_legacy_profile_requires_guided_upgrade(): void
+    {
+        DB::table('face_profiles')->insert(['user_id' => $this->user->id, 'embedding' => Crypt::encryptString(json_encode(array_fill(0, 128, 0.0))), 'enrolled_by' => $this->user->id]);
+        $this->getJson('/api/me')->assertJsonPath('face_enrolled', false);
+        $this->postJson('/api/face/challenges', ['purpose' => 'in', 'consent' => true])->assertUnprocessable();
+        $this->enroll();
+    }
+
+    public function test_incomplete_failed_and_malformed_step_cannot_enroll(): void
+    {
+        $c = $this->start();
+        $this->serviceStatus = 422;
+        $this->serviceBody = ['detail' => 'Bad pose'];
+        $this->step($c)->assertUnprocessable();
+        $this->serviceStatus = 200;
+        $this->serviceBody = ['embedding' => [0]];
+        $this->step($c)->assertStatus(503);
+        $this->postJson('/api/face/enroll', ['challenge_id' => $c['id']])->assertUnprocessable();
+        $this->assertDatabaseCount('face_profiles', 0);
+    }
+
+    public function test_owner_cannot_enroll_someone_else_using_legacy_endpoint(): void
+    {
+        $this->user->update(['role' => 'owner']);
+        $this->postJson('/api/users/'.$this->user->id.'/face', [])->assertStatus(405);
+    }
+
+    public function test_overnight_shift_is_visible_and_checkout_returns_both_timestamps(): void
+    {
+        $this->enroll();
+        $c = $this->complete('in');
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
+        $this->travel(1)->days();
+        $this->signIn($this->user);
+        $this->getJson('/api/dashboard')->assertOk()->assertJsonPath('today.user_id', $this->user->id);
+        $c = $this->complete('out');
+        $response = $this->postJson('/api/attendance', ['action' => 'out', 'challenge_id' => $c['id']])->assertOk();
+        $this->assertNotSame(substr($response->json('attendance.check_in'), 0, 10), substr($response->json('attendance.check_out'), 0, 10));
+        $this->getJson('/api/attendance')->assertOk()->assertJsonPath('data.0.check_out', $response->json('attendance.check_out'));
+    }
+
+    public function test_postgres_offset_is_serialized_as_utc_iso(): void
+    {
+        $row = FaceProof::attendance((object) ['check_in' => '2026-10-13 09:15:30+06', 'check_out' => '2026-10-13 18:15:30+06']);
+        $this->assertSame('2026-10-13T03:15:30.000000Z',$row->check_in);
+        $this->assertSame('2026-10-13T12:15:30.000000Z',$row->check_out);
+    }
+}

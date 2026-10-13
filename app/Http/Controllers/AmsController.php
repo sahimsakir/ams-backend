@@ -4,14 +4,14 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Notifications\ApplicationNotice;
+use App\Services\FaceProof;
 use App\Services\Workflow as W;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class AmsController extends Controller
@@ -61,7 +61,7 @@ class AmsController extends Controller
 
     public function me(Request $r)
     {
-        return ['user' => $r->user(), 'face_enrolled' => DB::table('face_profiles')->where('user_id', $r->user()->id)->exists()];
+        return ['user' => $r->user(), 'face_enrolled' => DB::table('face_profiles')->where('user_id', $r->user()->id)->where('verification_version', '>=', 2)->exists()];
     }
 
     public function leaveTypes()
@@ -82,7 +82,7 @@ class AmsController extends Controller
             return $t;
         });
 
-        return ['balances' => $balances, 'today' => DB::table('attendances')->where('user_id', $uid)->where('work_date', now('Asia/Dhaka')->toDateString())->first(), 'pending_reviews' => DB::table('approvals')->join('applications', 'applications.id', '=', 'approvals.application_id')->where('reviewer_id', $uid)->where('approvals.status', 'pending')->where('applications.status', 'pending')->count(), 'teams' => DB::table('team_user')->join('teams', 'teams.id', '=', 'team_user.team_id')->where('user_id', $uid)->select('teams.name', 'team_role')->get()];
+        return ['balances' => $balances, 'today' => FaceProof::attendance(DB::table('attendances')->where('user_id', $uid)->whereNull('check_out')->first() ?? DB::table('attendances')->where('user_id', $uid)->where('work_date', now('Asia/Dhaka')->toDateString())->first()), 'pending_reviews' => DB::table('approvals')->join('applications', 'applications.id', '=', 'approvals.application_id')->where('reviewer_id', $uid)->where('approvals.status', 'pending')->where('applications.status', 'pending')->count(), 'teams' => DB::table('team_user')->join('teams', 'teams.id', '=', 'team_user.team_id')->where('user_id', $uid)->select('teams.name', 'team_role')->get()];
     }
 
     public function applications(Request $r)
@@ -98,7 +98,7 @@ class AmsController extends Controller
             $item->approvals = $approvals->get($item->id, collect());
         }
 
-return $items;
+        return $items;
     }
 
     public function apply(Request $r)
@@ -189,35 +189,14 @@ return $items;
         return ['message' => 'Cancelled'];
     }
 
-    private function encoding(Request $r): array
-    {
-        $r->validate(['photo' => 'required|file|mimes:jpeg,png|max:4096', 'consent' => 'accepted']);
-        try {
-            $response = Http::timeout(30)->withHeaders(['X-Service-Key' => config('ams.face_key')])->attach('photo', file_get_contents($r->file('photo')->path()), 'capture.jpg')->post(config('ams.face_url').'/encode');
-        } catch (\Throwable $e) {
-            abort(503, 'Face service unavailable. Try again later.');
-        }abort_unless($response->successful(), 422, 'Face capture failed. Use one clearly visible face in good lighting.');
-        $v = $response->json('embedding');
-        abort_unless(is_array($v) && count($v) === 128, 503, 'Invalid face service response');
-
-        return $v;
-    }
-
-    public function enroll(Request $r, int $id)
-    {
-        $this->owner($r);
-        User::findOrFail($id);
-        $v = $this->encoding($r);
-        DB::table('face_profiles')->updateOrInsert(['user_id' => $id], ['embedding' => Crypt::encryptString(json_encode($v)), 'enrolled_by' => $r->user()->id, 'created_at' => now(), 'updated_at' => now()]);
-        W::audit($r->user()->id, 'face.enrolled', (string) $id);
-
-        return ['message' => 'Face enrolled'];
-    }
-
     public function deleteFace(Request $r, int $id)
     {
         $this->owner($r);
-        DB::table('face_profiles')->where('user_id', $id)->delete();
+        DB::transaction(function () use ($id) {
+            DB::table('users')->where('id', $id)->lockForUpdate()->first();
+            DB::table('face_profiles')->where('user_id', $id)->delete();
+            DB::table('face_challenges')->where('user_id', $id)->update(['expires_at' => now()]);
+        });
         W::audit($r->user()->id, 'face.deleted', (string) $id);
 
         return ['message' => 'Face template deleted'];
@@ -225,17 +204,14 @@ return $items;
 
     public function punch(Request $r)
     {
-        $d = $r->validate(['action' => 'required|in:in,out']);
+        $d = $r->validate(['action' => 'required|in:in,out', 'challenge_id' => 'required|uuid']);
         $uid = $r->user()->id;
-        $f = DB::table('face_profiles')->where('user_id', $uid)->first();
-        abort_unless($f, 422, 'Ask the owner to enroll your face first.');
-        $v = $this->encoding($r);
-        $known = json_decode(Crypt::decryptString($f->embedding), true);
-        $distance = sqrt(array_sum(array_map(fn ($a, $b) => ($a - $b) ** 2, $known, $v)));
-        abort_if($distance > config('ams.threshold'), 422, 'Face does not match your enrolled profile.');
 
-        return DB::transaction(function () use ($r, $uid, $d, $distance) {
+        return DB::transaction(function () use ($uid, $d) {
             DB::table('users')->where('id', $uid)->lockForUpdate()->first();
+            $proof = FaceProof::consume($uid, $d['challenge_id'], $d['action']);
+            $distance = $proof->decoded['distance'];
+            abort_unless($proof->photo && Storage::disk('local')->exists($proof->photo), 422, 'Camera verification expired. Start again.');
             $today = now('Asia/Dhaka')->toDateString();
             $open = DB::table('attendances')->where('user_id', $uid)->whereNull('check_out')->first();
             $existing = DB::table('attendances')->where('user_id', $uid)->where('work_date', $today)->first();
@@ -244,16 +220,19 @@ return $items;
                 $leave = DB::table('applications')->where('user_id', $uid)->where('kind', 'leave')->where('status', 'approved')->where('start_date', '<=', $today)->where('end_date', '>=', $today)->exists();
                 abort_if($leave, 422, 'You are on approved leave.');
                 $home = DB::table('applications')->where('user_id', $uid)->where('kind', 'home_office')->where('status', 'approved')->where('start_date', '<=', $today)->where(fn ($q) => $q->whereNull('end_date')->orWhere('end_date', '>=', $today))->exists();
-                $path = $r->file('photo')->store('attendance', 'local');
+                $path = 'attendance/'.Str::uuid().'.jpg';
+                abort_unless(Storage::disk('local')->copy($proof->photo, $path), 503, 'Could not save attendance photo. Try again.');
                 try {
-                    DB::table('attendances')->insert(['user_id' => $uid, 'work_date' => $today, 'check_in' => now(), 'mode' => $home ? 'home_office' : 'office', 'in_photo' => $path, 'in_distance' => $distance]);
+                    $recordId = DB::table('attendances')->insertGetId(['user_id' => $uid, 'work_date' => $today, 'check_in' => now(), 'mode' => $home ? 'home_office' : 'office', 'in_photo' => $path, 'in_distance' => $distance]);
                 } catch (\Throwable $e) {
                     Storage::disk('local')->delete($path);
                     throw $e;
                 }
             } else {
                 abort_unless($open, 409, 'No open shift to check out.');
-                $path = $r->file('photo')->store('attendance', 'local');
+                $recordId = $open->id;
+                $path = 'attendance/'.Str::uuid().'.jpg';
+                abort_unless(Storage::disk('local')->copy($proof->photo, $path), 503, 'Could not save attendance photo. Try again.');
                 try {
                     DB::table('attendances')->where('id', $open->id)->update(['check_out' => now(), 'out_photo' => $path, 'out_distance' => $distance]);
                 } catch (\Throwable $e) {
@@ -263,13 +242,13 @@ return $items;
             }
             W::audit($uid, 'attendance.'.$d['action'], $today);
 
-            return ['message' => $d['action'] === 'in' ? 'Checked in successfully' : 'Checked out successfully'];
+            return ['message' => $d['action'] === 'in' ? 'Checked in successfully' : 'Checked out successfully', 'attendance' => FaceProof::attendance(DB::table('attendances')->where('id', $recordId)->first())];
         });
     }
 
     public function attendance(Request $r)
     {
-        return DB::table('attendances')->join('users', 'users.id', '=', 'attendances.user_id')->whereIn('user_id', $this->visible($r))->select('attendances.id', 'user_id', 'users.name', 'work_date', 'check_in', 'check_out', 'mode')->orderByDesc('attendances.id')->paginate(100);
+        return DB::table('attendances')->join('users', 'users.id', '=', 'attendances.user_id')->whereIn('user_id', $this->visible($r))->select('attendances.id', 'user_id', 'users.name', 'work_date', 'check_in', 'check_out', 'mode')->orderByDesc('attendances.id')->paginate(100)->through(fn ($row) => FaceProof::attendance($row));
     }
 
     public function photo(Request $r, int $id, string $side)
@@ -288,7 +267,8 @@ return $items;
         $this->owner($r);
 
         return User::orderBy('name')->get()->map(function ($u) {
-            $u->face_enrolled = DB::table('face_profiles')->where('user_id', $u->id)->exists();
+            $u->face_enrolled = DB::table('face_profiles')->where('user_id', $u->id)->where('verification_version', '>=', 2)->exists();
+            $u->face_reset_available = DB::table('face_profiles')->where('user_id', $u->id)->exists();
 
             return $u;
         });
@@ -316,7 +296,7 @@ return $items;
             $q->whereIn('id', DB::table('team_user')->where('user_id', $r->user()->id)->select('team_id'));
         }
 
-return $q->get()->map(function ($t) {
+        return $q->get()->map(function ($t) {
             $t->members = DB::table('team_user')->join('users', 'users.id', '=', 'team_user.user_id')->where('team_id', $t->id)->select('users.id', 'users.name', 'team_role')->get();
 
             return $t;
@@ -365,15 +345,15 @@ return $q->get()->map(function ($t) {
     {
         $this->owner($r);
         $d = $r->validate(['date' => 'required|date_format:Y-m-d', 'name' => 'required|string|max:150', 'is_working' => 'required|boolean']);
-        DB::table('calendar_days')->updateOrInsert(['date' => $d['date']],$d);
+        DB::table('calendar_days')->updateOrInsert(['date' => $d['date']], $d);
 
         return ['message' => 'Calendar updated'];
     }
 
-    public function deleteCalendar(Request $r,int $id)
+    public function deleteCalendar(Request $r, int $id)
     {
         $this->owner($r);
-        DB::table('calendar_days')->where('id',$id)->delete();
+        DB::table('calendar_days')->where('id', $id)->delete();
 
         return ['message' => 'Calendar override removed'];
     }
@@ -382,6 +362,6 @@ return $q->get()->map(function ($t) {
     {
         $this->owner($r);
 
-        return DB::table('audit_logs')->join('users','users.id','=','audit_logs.actor_id')->select('audit_logs.*','users.name')->orderByDesc('audit_logs.id')->paginate(100);
+        return DB::table('audit_logs')->join('users', 'users.id', '=', 'audit_logs.actor_id')->select('audit_logs.*', 'users.name')->orderByDesc('audit_logs.id')->paginate(100);
     }
 }

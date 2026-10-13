@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AmsController as C;
+use App\Http\Controllers\FaceController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/login', [C::class, 'login'])->middleware('throttle:ams-login');
@@ -22,12 +23,14 @@ Route::middleware(['token', 'throttle:ams-api'])->group(function () {
     Route::get('/users', [C::class, 'users']);
     Route::post('/users', [C::class, 'saveUser']);
     Route::put('/users/{id}', [C::class, 'saveUser']);
-    Route::post('/users/{id}/face', [C::class, 'enroll'])->middleware('throttle:ams-face');
+    Route::post('/face/challenges', [FaceController::class, 'start'])->middleware('throttle:ams-face');
+    Route::post('/face/challenges/{id}/step', [FaceController::class, 'step'])->middleware('throttle:ams-face');
+    Route::post('/face/enroll', [FaceController::class, 'enroll'])->middleware('throttle:ams-face');
     Route::delete('/users/{id}/face', [C::class, 'deleteFace']);
     Route::get('/leave-types', [C::class, 'leaveTypes']);
     Route::post('/leave-types', [C::class, 'saveLeaveType']);
     Route::get('/calendar', [C::class, 'calendar']);
     Route::post('/calendar', [C::class, 'saveCalendar']);
     Route::delete('/calendar/{id}', [C::class, 'deleteCalendar']);
-    Route::get('/audit',[C::class, 'audit']);
+    Route::get('/audit', [C::class, 'audit']);
 });

@@ -171,13 +171,31 @@ class WorkflowTest extends TestCase
     private function face(float $coordinate = 0.0, int $status = 200): void
     {
         Storage::fake('local');
-        DB::table('face_profiles')->insert(['user_id' => $this->employee->id, 'embedding' => Crypt::encryptString(json_encode(array_fill(0, 128, 0.0))), 'enrolled_by' => $this->owner->id]);
-        Http::fake(['*' => Http::response(['embedding' => array_fill(0, 128, $coordinate)], $status)]);
+        DB::table('face_profiles')->insert(['user_id' => $this->employee->id, 'embedding' => Crypt::encryptString(json_encode(['templates' => [array_fill(0, 128, 0.0)]])), 'verification_version' => 2, 'enrolled_by' => $this->owner->id]);
+        Http::fake(['*' => Http::response(['embedding' => array_fill(0, 128, $coordinate), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => $coordinate], $status)]);
     }
 
     private function punch(string $action)
     {
-        return $this->asUser($this->employee)->post('/api/attendance', ['action' => $action, 'consent' => '1', 'photo' => UploadedFile::fake()->image('capture.jpg')], ['Accept' => 'application/json']);
+        $this->asUser($this->employee);
+        $res = $this->postJson('/api/face/challenges', ['purpose' => $action, 'consent' => true]);
+        $c = $res->json();
+        while ($res->status() === 200 && ! ($c['complete'] ?? false)) {
+            $this->travel(2)->seconds();
+            $frames = [];
+            for ($i = 0; $i < 4; $i++) {
+                $f = UploadedFile::fake()->image('capture.jpg');
+                file_put_contents($f->path(), random_bytes(16), FILE_APPEND);
+                $frames[] = $f;
+            }
+            $res = $this->post('/api/face/challenges/'.$c['id'].'/step', ['nonce' => $c['nonce'], 'frames' => $frames], ['Accept' => 'application/json']);
+            $c = $res->json();
+        }
+        if ($res->status() !== 200) {
+            return $res;
+        }
+
+        return $this->postJson('/api/attendance', ['action' => $action, 'challenge_id' => $c['id']]);
     }
 
     public function test_check_in_and_duplicate_guard(): void
@@ -200,7 +218,7 @@ class WorkflowTest extends TestCase
     public function test_face_service_failure_creates_no_record(): void
     {
         $this->face(0.0, 503);
-        $this->punch('in')->assertUnprocessable();
+        $this->punch('in')->assertStatus(503);
         $this->assertDatabaseCount('attendances', 0);
     }
 
@@ -208,9 +226,10 @@ class WorkflowTest extends TestCase
     {
         $id = $this->apply(['kind' => 'home_office', 'leave_type_id' => null, 'end_date' => null]);
         foreach ([$this->lead, $this->pm] as $u) {
-            $this->asUser($u)->postJson("/api/applications/$id/decision",['decision' => 'approved'])->assertOk();
-        }$this->assertDatabaseCount('attendances',0);
+            $this->asUser($u)->postJson("/api/applications/$id/decision", ['decision' => 'approved'])->assertOk();
+        }$this->assertDatabaseCount('attendances', 0);
     }
+
     public function test_api_traffic_does_not_consume_login_rate_limit(): void
     {
         $this->asUser($this->owner);
