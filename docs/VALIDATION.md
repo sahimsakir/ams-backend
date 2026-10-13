@@ -2,13 +2,13 @@
 
 ## Passed in this workspace
 
-- Laravel/PHP suite: **32 tests, 192 assertions**, PHP 8.4.12 with in-memory SQLite.
-- Tests cover all enrollment poses, self-enrollment, old-template upgrade, removal of owner photo enrollment, enrollment required for attendance, incomplete/expired/reused/wrong-user/wrong-purpose proof rejection, frozen frames, nonce reuse, face mismatch, service failure, profile reset, duplicate attendance, overnight checkout and ISO timestamp serialization.
+- Laravel/PHP suite: **35 tests, 203 assertions**, PHP 8.4.12 with in-memory SQLite.
+- Tests cover three enrollment checks, self-enrollment and owner enrollment, old-template upgrade, removal of owner photo enrollment, enrollment required for attendance, incomplete/expired/reused/wrong-user/wrong-purpose proof rejection, frozen frames, nonce reuse, face mismatch, service failure, profile reset, duplicate attendance, overnight checkout and ISO timestamp serialization.
 - Existing leave, approval, roles and login-rate-limit tests still pass.
 - Seven Python motion-rule tests pass: direction requirements, centered/open-eye front views, open/closed/open ordering, rejected static eyes, rejected head-turn-as-blink, final front view and scale-independent eye ratios.
 - Python face-service syntax compilation and Laravel Pint formatting pass.
 - TypeScript strict compile and Vite production build pass.
-- Three Playwright browser tests pass using a simulated camera and mocked API: seven-step self-enrollment with failed-step retry, five-step check-in/checkout and full date/time rendering; modal layout and camera track cleanup at 320, 390, 768, 1024, 1440 and 1920 px; camera-permission recovery instructions. No JavaScript exceptions were observed in the enrollment/attendance and layout checks.
+- Four Playwright browser tests pass using a simulated camera and mocked API: three-step self-enrollment with failed-step retry, three-step check-in/checkout and full date/time rendering; modal layout and camera track cleanup at 320, 390, 768, 1024, 1440 and 1920 px; camera-permission recovery instructions; owner enrollment for a selected user. No JavaScript exceptions were observed in the enrollment/attendance and layout checks.
 - Mobile camera modal screenshot visually reviewed.
 - HTTPS Vite `/api` proxy smoke check passed against a loopback test server. LAN binding could not be exercised in this sandbox; real phone access remains unverified.
 

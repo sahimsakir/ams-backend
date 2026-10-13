@@ -80,14 +80,15 @@ class FaceChallengeTest extends TestCase
         $this->postJson('/api/face/enroll', ['challenge_id' => $c['id']])->assertOk();
     }
 
-    public function test_all_directions_are_required_and_user_enrolls_self(): void
+    public function test_three_steps_are_required_and_user_enrolls_self(): void
     {
         $c = $this->start();
         $steps = json_decode(DB::table('face_challenges')->where('id', $c['id'])->value('steps'), true);
-        $this->assertCount(7, $steps);
-        foreach (['front', 'left', 'right', 'up', 'down', 'blink'] as $pose) {
+        $this->assertCount(3, $steps);
+        foreach (['front', 'blink'] as $pose) {
             $this->assertContains($pose, $steps);
         }
+        $this->assertContains($steps[1], ['left', 'right']);
         $this->postJson('/api/face/enroll', ['challenge_id' => $c['id']])->assertUnprocessable();
         while (! $c['complete']) {
             $c = $this->step($c)->assertOk()->json();
@@ -102,9 +103,9 @@ class FaceChallengeTest extends TestCase
     public function test_attendance_requires_enrollment_and_completed_camera_proof(): void
     {
         $this->postJson('/api/face/challenges', ['purpose' => 'in', 'consent' => true])->assertUnprocessable();
-        $this->post('/api/attendance', ['action' => 'in', 'consent' => true, 'photo' => $this->frames()[0]], ['Accept' => 'application/json'])->assertUnprocessable();
+        $this->post('/api/attendance', ['action' => 'in', 'consent' => true, 'photo' => $this->frames()[0]], ['Accept' => 'application/json'])->assertForbidden();
         $c = $this->complete();
-        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertForbidden();
         $this->assertDatabaseCount('attendances', 0);
     }
 
@@ -113,6 +114,7 @@ class FaceChallengeTest extends TestCase
         $this->enroll();
         $c = $this->complete('in');
         $other = User::create(['name' => 'Other', 'email' => 'other@example.com', 'password' => 'secure-password-123', 'role' => 'owner', 'active' => true]);
+        DB::table('face_profiles')->insert(['user_id' => $other->id, 'embedding' => Crypt::encryptString(json_encode(['templates' => [array_fill(0, 128, 0.0)]])), 'verification_version' => 2, 'enrolled_by' => $other->id]);
         $this->signIn($other);
         $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
         $this->signIn($this->user);
@@ -152,7 +154,7 @@ class FaceChallengeTest extends TestCase
         $c = $this->complete('in');
         $this->user->update(['role' => 'owner']);
         $this->deleteJson('/api/users/'.$this->user->id.'/face')->assertOk();
-        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertForbidden();
         $this->getJson('/api/me')->assertJsonPath('face_enrolled', false);
     }
 
@@ -179,6 +181,7 @@ class FaceChallengeTest extends TestCase
 
     public function test_owner_cannot_enroll_someone_else_using_legacy_endpoint(): void
     {
+        $this->enroll();
         $this->user->update(['role' => 'owner']);
         $this->postJson('/api/users/'.$this->user->id.'/face', [])->assertStatus(405);
     }
@@ -200,7 +203,43 @@ class FaceChallengeTest extends TestCase
     public function test_postgres_offset_is_serialized_as_utc_iso(): void
     {
         $row = FaceProof::attendance((object) ['check_in' => '2026-10-13 09:15:30+06', 'check_out' => '2026-10-13 18:15:30+06']);
-        $this->assertSame('2026-10-13T03:15:30.000000Z',$row->check_in);
-        $this->assertSame('2026-10-13T12:15:30.000000Z',$row->check_out);
+        $this->assertSame('2026-10-13T03:15:30.000000Z', $row->check_in);
+        $this->assertSame('2026-10-13T12:15:30.000000Z', $row->check_out);
+    }
+
+    public function test_unenrolled_user_cannot_access_any_workspace_features(): void
+    {
+        foreach (['dashboard', 'applications', 'attendance', 'teams', 'users', 'leave-types', 'calendar', 'audit'] as $path) {
+            $this->getJson('/api/'.$path)->assertForbidden()->assertJsonPath('face_enrollment_required', true);
+        }
+        $this->postJson('/api/applications', [])->assertForbidden();
+        $this->getJson('/api/me')->assertOk();
+        $this->enroll();
+        $this->getJson('/api/dashboard')->assertOk();
+    }
+
+    public function test_owner_can_enroll_another_user_and_employee_cannot(): void
+    {
+        $this->enroll();
+        $target = User::create(['name' => 'Target', 'email' => 'target@example.com', 'password' => 'secure-password-123', 'role' => 'employee', 'active' => true]);
+        $this->postJson('/api/face/challenges', ['purpose' => 'enroll', 'consent' => true, 'user_id' => $target->id])->assertForbidden();
+        $this->user->update(['role' => 'owner']);
+        $c = $this->postJson('/api/face/challenges', ['purpose' => 'enroll', 'consent' => true, 'user_id' => $target->id])->assertOk()->json();
+        while (! $c['complete']) {
+            $c = $this->step($c)->assertOk()->json();
+        }
+        $this->postJson('/api/face/enroll', ['challenge_id' => $c['id']])->assertOk()->assertJsonPath('user_id', $target->id);
+        $this->assertDatabaseHas('face_profiles', ['user_id' => $target->id, 'enrolled_by' => $this->user->id, 'verification_version' => 2]);
+        $this->signIn($target);
+        $this->getJson('/api/me')->assertJsonPath('face_enrolled', true);
+        $this->getJson('/api/dashboard')->assertOk();
+    }
+
+    public function test_unenrolled_owner_must_enroll_self_before_enrolling_others(): void
+    {
+        $this->user->update(['role' => 'owner']);
+        $target = User::create(['name' => 'Target', 'email' => 'target@example.com', 'password' => 'secure-password-123', 'role' => 'employee', 'active' => true]);
+        $this->postJson('/api/face/challenges', ['purpose' => 'enroll', 'consent' => true, 'user_id' => $target->id])->assertForbidden();
+        $this->getJson('/api/users')->assertForbidden();
     }
 }

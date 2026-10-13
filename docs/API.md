@@ -22,9 +22,9 @@ Base: `http://localhost:8000/api`. JSON errors have `message` and, for validatio
 | GET | /users | owner: people and enrollment status |
 | POST | /users | owner: name, email, role, active, password (12+), optional designation/phone |
 | PUT | /users/{id} | owner: same fields; password optional |
-| POST | /face/challenges | any user: purpose enroll/in/out, consent true; start own session |
+| POST | /face/challenges | purpose enroll/in/out, consent true; owner may supply user_id for another user’s enrollment |
 | POST | /face/challenges/{id}/step | multipart nonce plus frames[] (4–16 live JPEG frames, ≤512 KiB each) |
-| POST | /face/enroll | any user: challenge_id; enroll own face after all steps pass |
+| POST | /face/enroll | challenge_id; enroll session subject after all three steps pass |
 | DELETE | /users/{id}/face | owner: reset template and invalidate outstanding challenges |
 | GET | /leave-types | list policy types |
 | POST | /leave-types | owner: name, annual_limit (0–366) |
@@ -55,12 +55,16 @@ General authenticated rate limit: 120 requests/minute. Face challenge and attend
 
 ## Guided camera protocol
 
-Start a session with `POST /face/challenges` and `{ "purpose": "enroll", "consent": true }`. The response has `id`, zero-based `step`, `total`, current `pose`, `nonce`, `complete`, and ISO `expires_at`. Only the next required pose is returned. Enrollment requires front, all four shuffled directions, blink, and front again. Attendance requires front, two randomly chosen directions, blink, and front again.
+Start a session with `POST /face/challenges` and `{ "purpose": "enroll", "consent": true }`. The response has `id`, zero-based `step`, `total`, current `pose`, `nonce`, `complete`, and ISO `expires_at`. Only the next required pose is returned. Enrollment and attendance each require exactly three steps: front, one random left/right turn, and open/closed/open eyes.
 
-For each prompt, capture a fresh burst from the live camera. Send the returned nonce and `frames[]` to the step endpoint. At least four frames are required; the frontend sends sixteen for open/closed/open eyes. The server checks one face throughout, identity, landmark movement, duplicate frames, session owner, nonce and expiry. It advances only after successful verification. Retry the same prompt on a 422; restart an expired session. A new session revokes all previous sessions for that user. Sessions expire after ten minutes, and completed results expire after two minutes. Never trust client-provided match scores or completion flags.
+For each prompt, capture a fresh burst from the live camera. Send the returned nonce and `frames[]` to the step endpoint. At least four frames are required; the frontend sends sixteen for open/closed/open eyes. The server checks one face throughout, identity, landmark movement, duplicate frames, session owner, nonce and expiry. It advances only after successful verification. Retry the same prompt on a 422; restart an expired session. A new session revokes all previous sessions for the target person, including sessions started by an owner. Sessions expire after ten minutes, and completed results expire after two minutes. Never trust client-provided match scores or completion flags.
 
-Once `complete` is true, send its ID to `/face/enroll`, or `/attendance` with `action` matching the original purpose. A result is single use and bound to the enrolled template. Enrollment is self-service for every account role; the old owner photo-enrollment endpoint is removed. Existing version-1 templates must complete guided enrollment while matching their old template, or an owner can reset the template. Replacing an already verified template requires an owner reset.
+Once `complete` is true, send its ID to `/face/enroll`, or `/attendance` with `action` matching the original purpose. A result is single use and bound to the enrolled template. Enrollment is self-service for every account role. An enrolled owner can pass `user_id` to start a guided enrollment for another active user; the owner must capture the selected person in front of the camera with their consent. The session is bound to both the owner and the target; employees cannot enroll other people, and an enrollment proof cannot be used for attendance. The old single-photo enrollment endpoint remains removed. Existing version-1 templates must complete guided enrollment while matching their old template, or an owner can reset the template. Replacing an already verified template requires an owner reset.
 
 Attendance mutation responses include `{ "message": "…", "attendance": { "id": 1, "user_id": 2, "work_date": "2026-10-13", "check_in": "2026-10-13T03:15:30.000000Z", "check_out": null, "mode": "office" } }`. Dashboard and list endpoints use the same UTC ISO format. Dates/times are assigned by the server; work dates and display use Asia/Dhaka. Private paths and face match scores are omitted.
 
 This protocol has geometric motion checks, not certified presentation-attack detection. A normal uploaded or frozen photo cannot satisfy the supported flow; a manipulated recording or virtual camera may defeat it. The server cannot attest the physical source of browser camera frames. Do not describe it as photo/video spoof-proof.
+
+## Mandatory first enrollment
+
+Authenticated users without a verified face profile receive HTTP 403 with `{ "face_enrollment_required": true, "message": "Enroll your face to unlock your workspace." }` on workspace routes. Only `/me`, `/logout`, and the guided face challenge/enrollment endpoints remain accessible. This includes owners: they must enroll themselves before managing people or enrolling other users. Frontend displays a mandatory enrollment dialog automatically; it has no close button or workspace navigation. An owner-enrolled user can enter normally on their next login. Owners can reset a profile first if a verified template needs replacing.

@@ -195,7 +195,7 @@ class AmsController extends Controller
         DB::transaction(function () use ($id) {
             DB::table('users')->where('id', $id)->lockForUpdate()->first();
             DB::table('face_profiles')->where('user_id', $id)->delete();
-            DB::table('face_challenges')->where('user_id', $id)->update(['expires_at' => now()]);
+            DB::table('face_challenges')->where(fn ($q) => $q->where('user_id', $id)->orWhere('subject_id', $id))->update(['expires_at' => now()]);
         });
         W::audit($r->user()->id, 'face.deleted', (string) $id);
 

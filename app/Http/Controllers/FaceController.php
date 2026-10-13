@@ -22,32 +22,31 @@ class FaceController extends Controller
 
     public function start(Request $r)
     {
-        $d = $r->validate(['purpose' => 'required|in:enroll,in,out', 'consent' => 'required|accepted']);
+        $d = $r->validate(['purpose' => 'required|in:enroll,in,out', 'consent' => 'required|accepted', 'user_id' => 'nullable|integer|exists:users,id']);
 
         return DB::transaction(function () use ($r, $d) {
             $uid = $r->user()->id;
-            DB::table('users')->where('id', $uid)->lockForUpdate()->first();
-            $profile = DB::table('face_profiles')->where('user_id', $uid)->first();
+            $subject = (int) ($d['user_id'] ?? $uid);
+            abort_if($subject !== $uid && ($d['purpose'] !== 'enroll' || $r->user()->role !== 'owner'), 403, 'Only owners can enroll other users.');
+            FaceProof::lockUsers($uid, $subject);
+            abort_unless(DB::table('users')->where('id', $subject)->where('active', true)->exists(), 422, 'This account is inactive.');
+            abort_if($subject !== $uid && ! DB::table('face_profiles')->where('user_id', $uid)->where('verification_version', '>=', 2)->exists(), 403, 'Enroll your own face first.');
+            $profile = DB::table('face_profiles')->where('user_id', $subject)->first();
             if ($d['purpose'] === 'enroll') {
                 abort_if($profile && $profile->verification_version >= 2, 409, 'Already enrolled. Ask an owner to reset your profile if needed.');
             } else {
                 abort_unless($profile && $profile->verification_version >= 2, 422, 'Complete your own guided face enrollment first.');
             }
             // Starting again revokes old challenges, including completed but unused ones.
-            DB::table('face_challenges')->where('user_id', $uid)->whereNull('consumed_at')->update(['expires_at' => now()]);
-            $poses = ['left', 'right', 'up', 'down'];
-            for ($i = count($poses) - 1; $i > 0; $i--) {
-                $j = random_int(0, $i);
-                [$poses[$i], $poses[$j]] = [$poses[$j], $poses[$i]];
-            }
-            $steps = array_merge(['front'], $d['purpose'] === 'enroll' ? $poses : array_slice($poses, 0, 2), ['blink', 'front']);
+            DB::table('face_challenges')->where(fn ($q) => $q->where('subject_id', $subject)->orWhere(fn ($q) => $q->whereNull('subject_id')->where('user_id', $subject)))->whereNull('consumed_at')->update(['expires_at' => now()]);
+            $steps = ['front', random_int(0, 1) ? 'left' : 'right', 'blink'];
             $state = ['templates' => [], 'hashes' => [], 'baseline' => null, 'distance' => 0];
             if ($profile) {
                 $known = json_decode(Crypt::decryptString($profile->embedding), true);
                 $state['known'] = $profile->verification_version >= 2 ? $known['templates'] : [$known];
             }
             $id = (string) Str::uuid();
-            DB::table('face_challenges')->insert(['id' => $id, 'user_id' => $uid, 'purpose' => $d['purpose'], 'steps' => json_encode($steps), 'nonce' => Str::random(48), 'profile_hash' => FaceProof::profileHash($profile), 'state' => Crypt::encryptString(json_encode($state)), 'expires_at' => now()->addMinutes(10), 'created_at' => now(), 'updated_at' => now()]);
+            DB::table('face_challenges')->insert(['id' => $id, 'user_id' => $uid, 'subject_id' => $subject, 'purpose' => $d['purpose'], 'steps' => json_encode($steps), 'nonce' => Str::random(48), 'profile_hash' => FaceProof::profileHash($profile), 'state' => Crypt::encryptString(json_encode($state)), 'expires_at' => now()->addMinutes(10), 'created_at' => now(), 'updated_at' => now()]);
 
             return $this->view(DB::table('face_challenges')->where('id', $id)->first());
         });
@@ -59,12 +58,16 @@ class FaceController extends Controller
 
         return DB::transaction(function () use ($r, $id, $d) {
             $uid = $r->user()->id;
-            DB::table('users')->where('id', $uid)->lockForUpdate()->first();
+            $candidate = DB::table('face_challenges')->where('id', $id)->where('user_id', $uid)->first();
+            abort_unless($candidate, 404);
+            $subject = (int) ($candidate->subject_id ?? $uid);
+            abort_if($subject !== $uid && $r->user()->role !== 'owner', 403);
+            FaceProof::lockUsers($uid, $subject);
             $c = DB::table('face_challenges')->where('id', $id)->where('user_id', $uid)->lockForUpdate()->first();
             abort_unless($c, 404);
             abort_if($c->consumed_at || $c->completed_at || CarbonImmutable::parse($c->expires_at)->isPast(), 422, 'Camera session expired. Restart the camera.');
             abort_unless(hash_equals($c->nonce, $d['nonce']), 409, 'This step was already submitted. Restart the camera.');
-            abort_unless($c->profile_hash === FaceProof::profileHash(DB::table('face_profiles')->where('user_id', $uid)->first()), 422, 'Profile changed. Restart the camera.');
+            abort_unless($c->profile_hash === FaceProof::profileHash(DB::table('face_profiles')->where('user_id', $subject)->first()), 422, 'Profile changed. Restart the camera.');
             abort_if(CarbonImmutable::parse($c->updated_at)->diffInMilliseconds(now(), false) < 700, 422, 'Follow the live camera prompt before submitting.');
             $state = json_decode(Crypt::decryptString($c->state), true);
             $steps = json_decode($c->steps, true);
@@ -110,13 +113,17 @@ class FaceController extends Controller
 
         return DB::transaction(function () use ($r, $d) {
             $uid = $r->user()->id;
-            DB::table('users')->where('id', $uid)->lockForUpdate()->first();
+            $candidate = DB::table('face_challenges')->where('id', $d['challenge_id'])->where('user_id', $uid)->first();
+            abort_unless($candidate, 422, 'Invalid camera verification.');
+            $subject = (int) ($candidate->subject_id ?? $uid);
+            abort_if($subject !== $uid && $r->user()->role !== 'owner', 403);
+            FaceProof::lockUsers($uid, $subject);
             $c = FaceProof::consume($uid, $d['challenge_id'], 'enroll');
-            abort_if(DB::table('face_profiles')->where('user_id', $uid)->where('verification_version', '>=', 2)->exists(), 409, 'Already enrolled.');
-            DB::table('face_profiles')->updateOrInsert(['user_id' => $uid], ['embedding' => Crypt::encryptString(json_encode(['templates' => $c->decoded['templates']])), 'verification_version' => 2, 'enrolled_by' => $uid, 'created_at' => now(), 'updated_at' => now()]);
-            Workflow::audit($uid, 'face.self_enrolled', (string) $uid);
+            abort_if(DB::table('face_profiles')->where('user_id', $subject)->where('verification_version', '>=', 2)->exists(), 409, 'Already enrolled.');
+            DB::table('face_profiles')->updateOrInsert(['user_id' => $subject], ['embedding' => Crypt::encryptString(json_encode(['templates' => $c->decoded['templates']])), 'verification_version' => 2, 'enrolled_by' => $uid, 'created_at' => now(), 'updated_at' => now()]);
+            Workflow::audit($uid, $subject === $uid ? 'face.self_enrolled' : 'face.owner_enrolled', (string) $subject);
 
-            return ['message' => 'Your face is enrolled. You can now check in.', 'face_enrolled' => true];
+            return ['message' => $subject === $uid ? 'Your face is enrolled. Your workspace is ready.' : 'Face enrolled successfully for this user.', 'face_enrolled' => true, 'user_id' => $subject];
         });
     }
 }

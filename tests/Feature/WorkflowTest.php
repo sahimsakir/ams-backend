@@ -45,7 +45,10 @@ class WorkflowTest extends TestCase
 
     private function makeUser(string $role): User
     {
-        return User::create(['name' => $role, 'email' => uniqid().'@example.com', 'password' => 'secure-password-123', 'role' => $role, 'active' => true]);
+        $u = User::create(['name' => $role, 'email' => uniqid().'@example.com', 'password' => 'secure-password-123', 'role' => $role, 'active' => true]);
+        DB::table('face_profiles')->insert(['user_id' => $u->id, 'embedding' => Crypt::encryptString(json_encode(['templates' => [array_fill(0, 128, 0.0)]])), 'verification_version' => 2, 'enrolled_by' => $u->id]);
+
+        return $u;
     }
 
     private function asUser(User $u): static
@@ -171,6 +174,7 @@ class WorkflowTest extends TestCase
     private function face(float $coordinate = 0.0, int $status = 200): void
     {
         Storage::fake('local');
+        DB::table('face_profiles')->where('user_id', $this->employee->id)->delete();
         DB::table('face_profiles')->insert(['user_id' => $this->employee->id, 'embedding' => Crypt::encryptString(json_encode(['templates' => [array_fill(0, 128, 0.0)]])), 'verification_version' => 2, 'enrolled_by' => $this->owner->id]);
         Http::fake(['*' => Http::response(['embedding' => array_fill(0, 128, $coordinate), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => $coordinate], $status)]);
     }

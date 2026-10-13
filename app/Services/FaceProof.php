@@ -8,6 +8,11 @@ use Illuminate\Support\Facades\DB;
 
 class FaceProof
 {
+    public static function lockUsers(int $actor, int $subject): void
+    {
+        DB::table('users')->whereIn('id', array_unique([$actor, $subject]))->orderBy('id')->lockForUpdate()->get();
+    }
+
     public static function profileHash(?object $profile): ?string
     {
         return $profile ? hash('sha256', $profile->embedding) : null;
@@ -19,7 +24,9 @@ class FaceProof
         $c = DB::table('face_challenges')->where('id', $id)->where('user_id', $uid)->lockForUpdate()->first();
         abort_unless($c && $c->purpose === $purpose, 422, 'Invalid camera verification. Start again.');
         abort_if($c->consumed_at || ! $c->completed_at || CarbonImmutable::parse($c->expires_at)->isPast(), 422, 'Camera verification is incomplete, expired or already used. Start again.');
-        $profile = DB::table('face_profiles')->where('user_id', $uid)->first();
+        $subject = (int) ($c->subject_id ?? $uid);
+        abort_if($purpose !== 'enroll' && $subject !== $uid, 422, 'Invalid attendance subject.');
+        $profile = DB::table('face_profiles')->where('user_id', $subject)->first();
         abort_unless($c->profile_hash === self::profileHash($profile), 422, 'Face profile changed. Start again.');
         abort_if($purpose !== 'enroll' && (! $profile || $profile->verification_version < 2), 422, 'Complete your face enrollment first.');
         DB::table('face_challenges')->where('id', $id)->update(['consumed_at' => now()]);
