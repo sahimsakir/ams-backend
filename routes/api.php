@@ -25,6 +25,7 @@ Route::middleware(['token', 'throttle:ams-api'])->group(function () {
     Route::put('/users/{id}', [C::class, 'saveUser']);
     Route::post('/face/challenges', [FaceController::class, 'start'])->middleware('throttle:ams-face');
     Route::post('/face/challenges/{id}/step', [FaceController::class, 'step'])->middleware('throttle:ams-face');
+    Route::post('/face/challenges/{id}/capture', [FaceController::class, 'capture'])->middleware('throttle:ams-face');
     Route::post('/face/enroll', [FaceController::class, 'enroll'])->middleware('throttle:ams-face');
     Route::delete('/users/{id}/face', [C::class, 'deleteFace']);
     Route::get('/leave-types', [C::class, 'leaveTypes']);

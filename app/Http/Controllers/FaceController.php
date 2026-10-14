@@ -39,7 +39,7 @@ class FaceController extends Controller
             }
             // Starting again revokes old challenges, including completed but unused ones.
             DB::table('face_challenges')->where(fn ($q) => $q->where('subject_id', $subject)->orWhere(fn ($q) => $q->whereNull('subject_id')->where('user_id', $subject)))->whereNull('consumed_at')->update(['expires_at' => now()]);
-            $steps = $d['purpose'] === 'enroll' ? ['front', 'left', 'right'] : ['front', random_int(0, 1) ? 'left' : 'right', 'blink'];
+            $steps = $d['purpose'] === 'enroll' ? ['front', 'left', 'right'] : ['capture'];
             $state = ['templates' => [], 'hashes' => [], 'baseline' => null, 'distance' => 0];
             if ($profile) {
                 $known = json_decode(Crypt::decryptString($profile->embedding), true);
@@ -65,6 +65,7 @@ class FaceController extends Controller
             FaceProof::lockUsers($uid, $subject);
             $c = DB::table('face_challenges')->where('id', $id)->where('user_id', $uid)->lockForUpdate()->first();
             abort_unless($c, 404);
+            abort_unless($c->purpose === 'enroll', 422, 'Attendance requires a fresh anti-spoof camera capture.');
             abort_if($c->consumed_at || $c->completed_at || CarbonImmutable::parse($c->expires_at)->isPast(), 422, 'Camera session expired. Restart the camera.');
             abort_unless(hash_equals($c->nonce, $d['nonce']), 409, 'This step was already submitted. Restart the camera.');
             abort_unless($c->profile_hash === FaceProof::profileHash(DB::table('face_profiles')->where('user_id', $subject)->first()), 422, 'Profile changed. Restart the camera.');
@@ -102,6 +103,46 @@ class FaceController extends Controller
             }
             $complete = $c->step + 1 === count($steps);
             DB::table('face_challenges')->where('id', $id)->update(['state' => Crypt::encryptString(json_encode($state)), 'photo' => $photo, 'step' => $c->step + 1, 'nonce' => Str::random(48), 'updated_at' => now(), 'completed_at' => $complete ? now() : null, 'expires_at' => $complete ? now()->addMinutes(2) : $c->expires_at]);
+
+            return $this->view(DB::table('face_challenges')->where('id', $id)->first());
+        });
+    }
+
+    public function capture(Request $r, string $id)
+    {
+        $d = $r->validate(['nonce' => 'required|string', 'photo' => 'required|file|mimes:jpeg|max:1024']);
+
+        return DB::transaction(function () use ($r, $id, $d) {
+            $uid = $r->user()->id;
+            FaceProof::lockUsers($uid, $uid);
+            $c = DB::table('face_challenges')->where('id', $id)->where('user_id', $uid)->lockForUpdate()->first();
+            abort_unless($c && in_array($c->purpose, ['in', 'out']) && (int) $c->subject_id === $uid, 422, 'Invalid attendance camera session.');
+            abort_if($c->consumed_at || $c->completed_at || CarbonImmutable::parse($c->expires_at)->isPast(), 422, 'Camera session expired or used. Restart the camera.');
+            abort_unless(hash_equals($c->nonce, $d['nonce']), 409, 'Invalid capture nonce. Restart the camera.');
+            $profile = DB::table('face_profiles')->where('user_id', $uid)->first();
+            abort_unless($profile && $profile->verification_version >= 2 && $c->profile_hash === FaceProof::profileHash($profile), 422, 'Face profile changed. Restart the camera.');
+            $hash = hash_file('sha256', $r->file('photo')->path());
+            $reused = DB::table('attendances')->where('user_id', $uid)->where(fn ($q) => $q->where('in_capture_hash', $hash)->orWhere('out_capture_hash', $hash))->exists();
+            abort_if($reused, 422, 'This capture was already used. Take a fresh camera photo.');
+            $state = json_decode(Crypt::decryptString($c->state), true);
+            try {
+                $response = Http::timeout(45)->withHeaders(['X-Service-Key' => config('ams.face_key')])->attach('photo', file_get_contents($r->file('photo')->path()), 'capture.jpg')->post(config('ams.face_url').'/verify-capture', ['known' => json_encode($state['known']), 'threshold' => (string) config('ams.threshold')]);
+            } catch (\Throwable $e) {
+                abort(503, 'Face and anti-spoof verification unavailable. Try again.');
+            }
+            abort_if($response->serverError(), 503, 'Anti-spoof verification unavailable. No attendance recorded.');
+            abort_unless($response->successful(), 422, 'Face not verified. Use your own clear face in good lighting.');
+            $distance = $response->json('distance');
+            $score = $response->json('live_score');
+            abort_unless(is_numeric($distance) && is_finite((float) $distance) && $distance >= 0 && is_numeric($score) && is_finite((float) $score) && $score >= 0 && $score <= 1, 503, 'Invalid verification response.');
+            abort_if($distance > config('ams.threshold'), 422, 'Face does not match your enrolled profile.');
+            $minimum = config('ams.live_min_score');
+            abort_unless(is_finite($minimum) && $minimum >= .9 && $minimum <= 1, 503, 'Invalid anti-spoof configuration.');
+            abort_if($score < $minimum, 422, 'Photo or screen suspected, or capture quality is insufficient. Use your live face in good lighting and retry.');
+            $state['distance'] = (float) $distance;
+            $state['passive_verified'] = true;
+            $photo = $r->file('photo')->store('face-challenges', 'local');
+            DB::table('face_challenges')->where('id', $id)->update(['state' => Crypt::encryptString(json_encode($state)), 'photo' => $photo, 'capture_hash' => $hash, 'step' => 1, 'nonce' => Str::random(48), 'completed_at' => now(), 'updated_at' => now(), 'expires_at' => now()->addMinutes(2)]);
 
             return $this->view(DB::table('face_challenges')->where('id', $id)->first());
         });

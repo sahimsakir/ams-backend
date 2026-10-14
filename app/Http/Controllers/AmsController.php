@@ -223,7 +223,7 @@ class AmsController extends Controller
                 $path = 'attendance/'.Str::uuid().'.jpg';
                 abort_unless(Storage::disk('local')->copy($proof->photo, $path), 503, 'Could not save attendance photo. Try again.');
                 try {
-                    $recordId = DB::table('attendances')->insertGetId(['user_id' => $uid, 'work_date' => $today, 'check_in' => now(), 'mode' => $home ? 'home_office' : 'office', 'in_photo' => $path, 'in_distance' => $distance]);
+                    $recordId = DB::table('attendances')->insertGetId(['user_id' => $uid, 'work_date' => $today, 'check_in' => now(), 'mode' => $home ? 'home_office' : 'office', 'in_photo' => $path, 'in_distance' => $distance, 'in_capture_hash' => $proof->capture_hash]);
                 } catch (\Throwable $e) {
                     Storage::disk('local')->delete($path);
                     throw $e;
@@ -234,7 +234,7 @@ class AmsController extends Controller
                 $path = 'attendance/'.Str::uuid().'.jpg';
                 abort_unless(Storage::disk('local')->copy($proof->photo, $path), 503, 'Could not save attendance photo. Try again.');
                 try {
-                    DB::table('attendances')->where('id', $open->id)->update(['check_out' => now(), 'out_photo' => $path, 'out_distance' => $distance]);
+                    DB::table('attendances')->where('id', $open->id)->update(['check_out' => now(), 'out_photo' => $path, 'out_distance' => $distance, 'out_capture_hash' => $proof->capture_hash]);
                 } catch (\Throwable $e) {
                     Storage::disk('local')->delete($path);
                     throw $e;

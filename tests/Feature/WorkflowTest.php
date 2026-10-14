@@ -176,28 +176,20 @@ class WorkflowTest extends TestCase
         Storage::fake('local');
         DB::table('face_profiles')->where('user_id', $this->employee->id)->delete();
         DB::table('face_profiles')->insert(['user_id' => $this->employee->id, 'embedding' => Crypt::encryptString(json_encode(['templates' => [array_fill(0, 128, 0.0)]])), 'verification_version' => 2, 'enrolled_by' => $this->owner->id]);
-        Http::fake(['*' => Http::response(['embedding' => array_fill(0, 128, $coordinate), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => $coordinate], $status)]);
+        Http::fake(['*' => Http::response(['embedding' => array_fill(0, 128, $coordinate), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => $coordinate, 'live_score' => .99], $status)]);
     }
 
     private function punch(string $action)
     {
         $this->asUser($this->employee);
-        $res = $this->postJson('/api/face/challenges', ['purpose' => $action, 'consent' => true]);
-        $c = $res->json();
-        while ($res->status() === 200 && ! ($c['complete'] ?? false)) {
-            $this->travel(2)->seconds();
-            $frames = [];
-            for ($i = 0; $i < 4; $i++) {
-                $f = UploadedFile::fake()->image('capture.jpg');
-                file_put_contents($f->path(), random_bytes(16), FILE_APPEND);
-                $frames[] = $f;
-            }
-            $res = $this->post('/api/face/challenges/'.$c['id'].'/step', ['nonce' => $c['nonce'], 'frames' => $frames], ['Accept' => 'application/json']);
-            $c = $res->json();
-        }
+        $c = $this->postJson('/api/face/challenges', ['purpose' => $action, 'consent' => true])->assertOk()->json();
+        $photo = UploadedFile::fake()->image('capture.jpg');
+        file_put_contents($photo->path(), random_bytes(16), FILE_APPEND);
+        $res = $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json']);
         if ($res->status() !== 200) {
             return $res;
         }
+        $c = $res->json();
 
         return $this->postJson('/api/attendance', ['action' => $action, 'challenge_id' => $c['id']]);
     }

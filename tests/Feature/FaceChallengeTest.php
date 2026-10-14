@@ -28,7 +28,7 @@ class FaceChallengeTest extends TestCase
         config(['app.key' => 'base64:'.base64_encode(str_repeat('a', 32))]);
         Storage::fake('local');
         Http::preventStrayRequests();
-        Http::fake(fn () => Http::response($this->serviceBody ?? ['embedding' => array_fill(0, 128, 0.0), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => 0], $this->serviceStatus));
+        Http::fake(fn () => Http::response($this->serviceBody ?? ['embedding' => array_fill(0, 128, 0.0), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => 0, 'live_score' => .99], $this->serviceStatus));
         $this->user = User::create(['name' => 'Self', 'email' => 'self@example.com', 'password' => 'secure-password-123', 'role' => 'employee', 'active' => true]);
         $this->signIn($this->user);
     }
@@ -60,6 +60,10 @@ class FaceChallengeTest extends TestCase
     private function step(array $c, ?array $frames = null)
     {
         $this->travel(2)->seconds();
+
+        if (($c['pose'] ?? null) === 'capture') {
+            return $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => ($frames ?? $this->frames())[0]], ['Accept' => 'application/json']);
+        }
 
         return $this->post('/api/face/challenges/'.$c['id'].'/step', ['nonce' => $c['nonce'], 'frames' => $frames ?? $this->frames()], ['Accept' => 'application/json']);
     }
@@ -237,5 +241,52 @@ class FaceChallengeTest extends TestCase
         $target = User::create(['name' => 'Target', 'email' => 'target@example.com', 'password' => 'secure-password-123', 'role' => 'employee', 'active' => true]);
         $this->postJson('/api/face/challenges', ['purpose' => 'enroll', 'consent' => true, 'user_id' => $target->id])->assertForbidden();
         $this->getJson('/api/users')->assertForbidden();
+    }
+
+    public function test_spoof_and_uncertain_captures_cannot_record_attendance(): void
+    {
+        $this->enroll();
+        $c = $this->start('in');
+        $this->assertSame('capture', $c['pose']);
+        $this->assertSame(1, $c['total']);
+        $this->serviceBody = ['distance' => 0, 'live_score' => .2];
+        $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $this->frames()[0], 'live_score' => 1], ['Accept' => 'application/json'])->assertUnprocessable();
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->assertDatabaseCount('attendances', 0);
+    }
+
+    public function test_missing_invalid_or_unavailable_anti_spoof_result_fails_closed(): void
+    {
+        $this->enroll();
+        $c = $this->start('in');
+        foreach ([['distance' => 0], ['distance' => 0, 'live_score' => 'NaN'], ['distance' => 0, 'live_score' => 1.5]] as $body) {
+            $this->serviceBody = $body;
+            $this->step($c)->assertStatus(503);
+        }
+        $this->serviceStatus = 503;
+        $this->step($c)->assertStatus(503);
+        $this->assertDatabaseCount('attendances', 0);
+    }
+
+    public function test_attendance_cannot_use_old_step_endpoint_or_unverified_proof(): void
+    {
+        $this->enroll();
+        $c = $this->start('in');
+        $this->post('/api/face/challenges/'.$c['id'].'/step', ['nonce' => $c['nonce'], 'frames' => $this->frames()], ['Accept' => 'application/json'])->assertUnprocessable();
+        DB::table('face_challenges')->where('id', $c['id'])->update(['completed_at' => now()]);
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->assertDatabaseCount('attendances', 0);
+    }
+
+    public function test_identical_photo_cannot_be_reused_for_checkout(): void
+    {
+        $this->enroll();
+        $c = $this->start('in');
+        $photo = $this->frames()[0];
+        $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json'])->assertOk();
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
+        $c = $this->start('out');
+        $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json'])->assertUnprocessable();
+        $this->assertDatabaseHas('attendances', ['user_id' => $this->user->id, 'check_out' => null]);
     }
 }

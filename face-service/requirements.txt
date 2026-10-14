@@ -6,3 +6,4 @@ dlib==19.24.6
 numpy==1.26.4
 Pillow==11.2.1
 setuptools<81
+onnxruntime==1.22.0

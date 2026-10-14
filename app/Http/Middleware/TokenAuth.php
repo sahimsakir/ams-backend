@@ -17,7 +17,7 @@ class TokenAuth
         abort_unless($user && $user->active, 401, 'Account unavailable.');
         $r->setUserResolver(fn () => $user);
 
-        $allowed = $r->is('api/me', 'api/logout', 'api/face/challenges', 'api/face/challenges/*/step', 'api/face/enroll');
+        $allowed = $r->is('api/me', 'api/logout', 'api/face/challenges', 'api/face/challenges/*/step', 'api/face/challenges/*/capture', 'api/face/enroll');
         if (! $allowed && ! DB::table('face_profiles')->where('user_id', $user->id)->where('verification_version', '>=', 2)->exists()) {
             return response()->json(['message' => 'Enroll your face to unlock your workspace.', 'face_enrollment_required' => true], 403);
         }

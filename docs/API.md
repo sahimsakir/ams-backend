@@ -23,7 +23,8 @@ Base: `http://localhost:8000/api`. JSON errors have `message` and, for validatio
 | POST | /users | owner: name, email, role, active, password (12+), optional designation/phone |
 | PUT | /users/{id} | owner: same fields; password optional |
 | POST | /face/challenges | purpose enroll/in/out, consent true; owner may supply user_id for another user’s enrollment |
-| POST | /face/challenges/{id}/step | multipart nonce plus frames[] (4–16 live JPEG frames, ≤512 KiB each) |
+| POST | /face/challenges/{id}/step | enrollment only: multipart nonce plus frames[] (4–16 JPEG frames, ≤512 KiB each) |
+| POST | /face/challenges/{id}/capture | attendance only: multipart nonce plus one photo (JPEG ≤1 MiB), face match + passive anti-spoof |
 | POST | /face/enroll | challenge_id; enroll session subject after all three steps pass |
 | DELETE | /users/{id}/face | owner: reset template and invalidate outstanding challenges |
 | GET | /leave-types | list policy types |
@@ -55,9 +56,9 @@ General authenticated rate limit: 120 requests/minute. Face challenge and attend
 
 ## Guided camera protocol
 
-Start a session with `POST /face/challenges` and `{ "purpose": "enroll", "consent": true }`. The response has `id`, zero-based `step`, `total`, current `pose`, `nonce`, `complete`, and ISO `expires_at`. Only the next required pose is returned. Enrollment requires exactly three steps: front, left, right. Attendance still requires front, one random left/right turn, and open/closed/open eyes.
+Start a session with `POST /face/challenges` and `{ "purpose": "enroll", "consent": true }`. The response has `id`, zero-based `step`, `total`, current `pose`, `nonce`, `complete`, and ISO `expires_at`. Only the next required pose is returned. Enrollment requires exactly three steps: front, left, right. Attendance has a single `capture` step, verified by face matching and a passive anti-spoof classifier.
 
-For each prompt, capture a fresh burst from the live camera. Send the returned nonce and `frames[]` to the step endpoint. At least four frames are required; the frontend sends sixteen for open/closed/open eyes. The server checks one face throughout, identity, landmark movement, duplicate frames, session owner, nonce and expiry. It advances only after successful verification. Retry the same prompt on a 422; restart an expired session. A new session revokes all previous sessions for the target person, including sessions started by an owner. Sessions expire after ten minutes, and completed results expire after two minutes. Never trust client-provided match scores or completion flags.
+For each prompt, capture a fresh burst from the live camera. Send the returned nonce and `frames[]` to the step endpoint. At least four enrollment frames are required. For attendance, send just one live camera JPEG plus nonce to the `/capture` endpoint instead; the enrollment step endpoint cannot verify attendance. The server checks one face throughout, identity, landmark movement, duplicate frames, session owner, nonce and expiry. It advances only after successful verification. Retry the same prompt on a 422; restart an expired session. A new session revokes all previous sessions for the target person, including sessions started by an owner. Sessions expire after ten minutes, and completed results expire after two minutes. Never trust client-provided match scores or completion flags.
 
 Once `complete` is true, send its ID to `/face/enroll`, or `/attendance` with `action` matching the original purpose. A result is single use and bound to the enrolled template. Enrollment is self-service for every account role. An enrolled owner can pass `user_id` to start a guided enrollment for another active user; the owner must capture the selected person in front of the camera with their consent. The session is bound to both the owner and the target; employees cannot enroll other people, and an enrollment proof cannot be used for attendance. The old single-photo enrollment endpoint remains removed. Existing version-1 templates must complete guided enrollment while matching their old template, or an owner can reset the template. Replacing an already verified template requires an owner reset.
 
@@ -67,4 +68,10 @@ This protocol has geometric motion checks, not certified presentation-attack det
 
 ## Mandatory first enrollment
 
-Authenticated users without a verified face profile receive HTTP 403 with `{ "face_enrollment_required": true, "message": "Enroll your face to unlock your workspace." }` on workspace routes. Only `/me`, `/logout`, and the guided face challenge/enrollment endpoints remain accessible. This includes owners: they must enroll themselves before managing people or enrolling other users. Frontend displays a mandatory enrollment dialog automatically; it has no close button or workspace navigation. An owner-enrolled user can enter normally on their next login. Owners can reset a profile first if a verified template needs replacing.
+Authenticated users without a verified face profile receive HTTP 403 with `{ "face_enrollment_required": true, "message": "Enroll your face to unlock your workspace." }` on workspace routes. Only `/me`, `/logout`, and the face challenge/capture/enrollment endpoints remain accessible. Attendance capture still requires a verified enrollment. This includes owners: they must enroll themselves before managing people or enrolling other users. Frontend displays a mandatory enrollment dialog automatically; it has no close button or workspace navigation. An owner-enrolled user can enter normally on their next login. Owners can reset a profile first if a verified template needs replacing.
+
+## Single-capture attendance
+
+Start `POST /face/challenges` with purpose `in` or `out` and consent true. It returns `total: 1`, `pose: capture` and a nonce. Send the nonce and one JPEG `photo` to `/face/challenges/{id}/capture`. Laravel calls the internal face/PAD service, then validates the face distance and real-face score itself. Only a successful response yields a completed proof, which is sent to `/attendance` with the matching action. Model results are never accepted from the browser. New single-capture results remain bound to the profile, user, action, expiry and single use.
+
+Status 422 means the face did not match, the anti-spoof score was insufficient, or the exact photo was used previously. Status 503 means the verifier/configuration is unavailable or invalid. Neither path creates attendance. The old motion-only completed attendance proofs are rejected. Capture hashes and classifier outputs are private and omitted from attendance JSON. The model is probabilistic; the endpoint cannot guarantee that every physical print/screen attack will fail.

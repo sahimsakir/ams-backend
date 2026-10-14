@@ -32,6 +32,8 @@ class FaceProof
         DB::table('face_challenges')->where('id', $id)->update(['consumed_at' => now()]);
         $c->decoded = json_decode(Crypt::decryptString($c->state), true);
 
+        abort_if($purpose !== 'enroll' && (($c->decoded['passive_verified'] ?? false) !== true || ! $c->capture_hash), 422, 'Take a new anti-spoof camera capture before giving attendance.');
+
         return $c;
     }
 
@@ -44,7 +46,7 @@ class FaceProof
             $row->$key = $row->$key ? CarbonImmutable::parse($row->$key, 'UTC')->utc()->toISOString() : null;
         }
         // Never expose private storage paths or matching scores in attendance JSON.
-        unset($row->in_photo, $row->out_photo, $row->in_distance, $row->out_distance);
+        unset($row->in_photo, $row->out_photo, $row->in_distance, $row->out_distance, $row->in_capture_hash, $row->out_capture_hash);
 
         return $row;
     }
