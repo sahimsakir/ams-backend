@@ -186,18 +186,20 @@ class FaceChallengeTest extends TestCase
         $this->postJson('/api/users/'.$this->user->id.'/face', [])->assertStatus(405);
     }
 
-    public function test_overnight_shift_is_visible_and_checkout_returns_both_timestamps(): void
+    public function test_previous_day_missing_exit_does_not_block_new_check_in(): void
     {
         $this->enroll();
         $c = $this->complete('in');
         $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
+        $oldDate = now('Asia/Dhaka')->toDateString();
         $this->travel(1)->days();
         $this->signIn($this->user);
-        $this->getJson('/api/dashboard')->assertOk()->assertJsonPath('today.user_id', $this->user->id);
+        $this->getJson('/api/dashboard')->assertOk()->assertJsonPath('today', null);
         $c = $this->complete('out');
-        $response = $this->postJson('/api/attendance', ['action' => 'out', 'challenge_id' => $c['id']])->assertOk();
-        $this->assertNotSame(substr($response->json('attendance.check_in'), 0, 10), substr($response->json('attendance.check_out'), 0, 10));
-        $this->getJson('/api/attendance')->assertOk()->assertJsonPath('data.0.check_out', $response->json('attendance.check_out'));
+        $this->postJson('/api/attendance', ['action' => 'out', 'challenge_id' => $c['id']])->assertStatus(409);
+        $this->getJson('/api/attendance?start_date='.$oldDate)->assertOk()->assertJsonPath('data.0.status', 'missing_exit')->assertJsonPath('summary.missing_exits', 1);
+        $c = $this->complete('in');
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
     }
 
     public function test_postgres_offset_is_serialized_as_utc_iso(): void

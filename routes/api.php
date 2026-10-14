@@ -14,6 +14,7 @@ Route::middleware(['token', 'throttle:ams-api'])->group(function () {
     Route::post('/applications', [C::class, 'apply']);
     Route::post('/applications/{id}/decision', [C::class, 'decision']);
     Route::post('/applications/{id}/cancel', [C::class, 'cancel']);
+    Route::put('/work-slots/{kind}/{id}', [C::class, 'saveSlot']);
     Route::get('/attendance', [C::class, 'attendance']);
     Route::post('/attendance', [C::class, 'punch'])->middleware('throttle:ams-face');
     Route::get('/attendance/{id}/photo/{side}', [C::class, 'photo']);

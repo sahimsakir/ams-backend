@@ -40,7 +40,7 @@ Attendance uses **one camera image matched against the enrolled face**:
 2. The server requires exactly one clearly visible face and compares its encoding with that account's enrolled templates.
 3. A successful match records attendance immediately and returns the server timestamp. There is no head-turn, blinking, liveness or passive anti-spoof requirement for attendance.
 
-Sessions remain bound to the user, profile, action, nonce, expiry and single use. Face mismatches, invalid service responses, unavailable verification, expired proofs and duplicate attendance fail closed. Exact previously used image bytes cannot be reused; this does not detect a newly photographed copy of a printed/screen image. Photos/templates remain private, and UTC ISO timestamps are displayed in Asia/Dhaka. Open overnight shifts remain available for checkout.
+Sessions remain bound to the user, profile, action, nonce, expiry and single use. Face mismatches, invalid service responses, unavailable verification, expired proofs and duplicate attendance fail closed. Exact previously used image bytes cannot be reused; this does not detect a newly photographed copy of a printed/screen image. Photos/templates remain private, and UTC ISO timestamps are displayed in Asia/Dhaka. A missing checkout becomes a missing exit after midnight in Asia/Dhaka; it cannot be checked out the next day and does not block a new check-in.
 
 Enrollment stays at forward/left/right and still gates workspace access. The passive classifier and attendance head-turn checks were removed at the user's explicit request. `FACE_LIVE_MIN_SCORE` is obsolete. No ONNX/OpenCV dependency or anti-spoof weight download is needed.
 
@@ -81,3 +81,13 @@ docker compose up -d --force-recreate api worker
 docker compose exec api php artisan optimize:clear
 ```
 Keep your existing `.env`, `APP_KEY` and database volume. Also pull and restart the frontend.
+
+### Monthly attendance reports and work slots
+
+Only owners can view other users' attendance/photos; managers, PMs and team leads are limited to their own. `GET /api/attendance` defaults to the first of the current month through today (Asia/Dhaka), accepts `start_date`, `end_date`, `page`, and owner-only `user_id`. Ranges are limited to one year. Rows include office/home mode, approved working-day leave with type, assigned slot, elapsed minutes, minutes inside the slot and missing-exit status. Summary values cover the full filtered range, independent of pagination.
+
+Rates use elapsed working days (Friday/Saturday excluded unless overridden by the calendar). Owner-wide totals use employee-days. Working-hour averages use completed shifts only; missing exits and today's unfinished shift are excluded. Actual hours are the intersection of check-in/out with the assigned slot. Early-arrival minutes are averaged across all check-ins; late-departure minutes across completed shifts. No lunch/break deduction is applied. Approved future leave appears as rows but does not inflate elapsed-day rates.
+
+Owners set same-day slots via `PUT /api/work-slots/users/{id}` or `/teams/{id}` with nullable `slot_start` and `slot_end` (`HH:mm`), plus optional user `slot_team_id`. Precedence: individual override → selected configured member team → lowest-ID configured member team → 09:00–18:00. Clearing both times restores inheritance. Slots are snapshotted at check-in; existing records use 09:00–18:00 after migration. Pending exits become missing at local midnight on report evaluation; no scheduler or fabricated checkout is needed.
+
+Run `docker compose build api worker`, `docker compose run --rm api php artisan migrate --force`, `docker compose up -d --force-recreate api worker`, and `docker compose exec api php artisan optimize:clear` after pulling. Then pull/restart the frontend.

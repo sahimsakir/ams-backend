@@ -3,7 +3,9 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Services\AttendanceReport;
 use App\Services\Workflow;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Crypt;
@@ -277,5 +279,48 @@ class WorkflowTest extends TestCase
         $other = $this->makeUser('employee');
         $this->asUser($other)->get('/api/applications/'.$id.'/document')->assertNotFound();
         $this->assertDatabaseHas('applications', ['id' => $id, 'minutes' => 180, 'end_date' => '2026-10-20']);
+    }
+
+    private function reportRecord(User $u, string $date, string $in, ?string $out, string $mode = 'office'): int
+    {
+        return DB::table('attendances')->insertGetId(['user_id' => $u->id, 'work_date' => $date, 'check_in' => $in, 'check_out' => $out, 'mode' => $mode, 'in_photo' => 'private.jpg', 'in_distance' => 0.1, 'slot_start' => '09:00', 'slot_end' => '18:00']);
+    }
+
+    public function test_only_owner_can_see_other_attendance_and_photos(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-10-21 12:00', 'Asia/Dhaka'));
+        $id = $this->reportRecord($this->employee, '2026-10-18', '2026-10-18 03:00:00', '2026-10-18 12:00:00');
+        foreach ([$this->lead, $this->pm] as $u) {
+            $this->asUser($u)->getJson('/api/attendance')->assertJsonCount(0, 'data');
+            $this->getJson('/api/attendance?user_id='.$this->employee->id)->assertForbidden();
+            $this->get('/api/attendance/'.$id.'/photo/in')->assertNotFound();
+        }
+        $this->asUser($this->owner)->getJson('/api/attendance')->assertJsonCount(1, 'data');
+    }
+
+    public function test_report_metrics_clip_hours_and_include_leave_and_missing_exit(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-10-21 12:00', 'Asia/Dhaka'));
+        $this->reportRecord($this->employee, '2026-10-18', '2026-10-18 02:30:00', '2026-10-18 12:30:00');
+        $this->reportRecord($this->employee, '2026-10-19', '2026-10-19 03:30:00', '2026-10-19 11:30:00', 'home_office');
+        $this->reportRecord($this->employee, '2026-10-20', '2026-10-20 03:00:00', null);
+        DB::table('applications')->insert(['user_id' => $this->employee->id, 'kind' => 'leave', 'leave_type_id' => $this->leave, 'start_date' => '2026-10-21', 'end_date' => '2026-10-21', 'days' => 1, 'reason' => 'Personal leave', 'status' => 'approved']);
+        $r = $this->asUser($this->employee)->getJson('/api/attendance?start_date=2026-10-18&end_date=2026-10-21')->assertOk();
+        $r->assertJsonPath('summary.working_days', 4)->assertJsonPath('summary.late_days', 1)->assertJsonPath('summary.leave_days', 1)->assertJsonPath('summary.home_office_days', 1)->assertJsonPath('summary.missing_exits', 1)->assertJsonPath('summary.avg_working_minutes', 540)->assertJsonPath('summary.actual_avg_minutes', 510)->assertJsonPath('summary.early_arrival_avg_minutes', 10)->assertJsonPath('summary.late_departure_avg_minutes', 15)->assertJsonPath('data.0.leave_name', 'Casual');
+        $this->getJson('/api/attendance?start_date=2026-10-19&end_date=2026-10-19')->assertJsonCount(1, 'data');
+        $this->getJson('/api/attendance?start_date=2026-10-21&end_date=2026-10-18')->assertUnprocessable();
+    }
+
+    public function test_owner_work_slots_inherit_team_with_user_override(): void
+    {
+        $team = DB::table('teams')->first();
+        $this->asUser($this->employee)->putJson('/api/work-slots/teams/'.$team->id, ['slot_start' => '10:00', 'slot_end' => '19:00'])->assertForbidden();
+        $this->asUser($this->owner)->putJson('/api/work-slots/teams/'.$team->id, ['slot_start' => '10:00', 'slot_end' => '19:00'])->assertOk();
+        $this->assertSame(['10:00', '19:00'], AttendanceReport::slot($this->employee->id));
+        $this->putJson('/api/work-slots/users/'.$this->employee->id, ['slot_start' => '08:00', 'slot_end' => '17:00', 'slot_team_id' => $team->id])->assertOk();
+        $this->assertSame(['08:00', '17:00'], AttendanceReport::slot($this->employee->id));
+        $this->putJson('/api/work-slots/users/'.$this->employee->id, ['slot_start' => '18:00', 'slot_end' => '09:00'])->assertUnprocessable();
+        $this->putJson('/api/work-slots/users/'.$this->employee->id, ['slot_start' => null, 'slot_end' => null, 'slot_team_id' => $team->id])->assertOk();
+        $this->assertSame(['10:00', '19:00'],AttendanceReport::slot($this->employee->id));
     }
 }

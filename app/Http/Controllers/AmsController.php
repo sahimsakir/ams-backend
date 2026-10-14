@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Notifications\ApplicationNotice;
+use App\Services\AttendanceReport;
 use App\Services\FaceProof;
 use App\Services\Workflow as W;
 use Carbon\CarbonImmutable;
@@ -23,12 +24,7 @@ class AmsController extends Controller
 
     private function visible(Request $r): array
     {
-        if ($r->user()->role === 'owner') {
-            return DB::table('users')->pluck('id')->all();
-        }
-        $teams = DB::table('team_user')->where('user_id', $r->user()->id)->whereIn('team_role', ['team_lead', 'manager', 'pm'])->pluck('team_id');
-
-        return DB::table('team_user')->whereIn('team_id', $teams)->pluck('user_id')->push($r->user()->id)->unique()->all();
+        return $r->user()->role === 'owner' ? DB::table('users')->pluck('id')->all() : [$r->user()->id];
     }
 
     public function login(Request $r)
@@ -82,7 +78,7 @@ class AmsController extends Controller
             return $t;
         });
 
-        return ['balances' => $balances, 'today' => FaceProof::attendance(DB::table('attendances')->where('user_id', $uid)->whereNull('check_out')->first() ?? DB::table('attendances')->where('user_id', $uid)->where('work_date', now('Asia/Dhaka')->toDateString())->first()), 'pending_reviews' => DB::table('approvals')->join('applications', 'applications.id', '=', 'approvals.application_id')->where('reviewer_id', $uid)->where('approvals.status', 'pending')->where('applications.status', 'pending')->count(), 'teams' => DB::table('team_user')->join('teams', 'teams.id', '=', 'team_user.team_id')->where('user_id', $uid)->select('teams.name', 'team_role')->get()];
+        return ['balances' => $balances, 'today' => FaceProof::attendance(DB::table('attendances')->where('user_id', $uid)->where('work_date', now('Asia/Dhaka')->toDateString())->first()), 'pending_reviews' => DB::table('approvals')->join('applications', 'applications.id', '=', 'approvals.application_id')->where('reviewer_id', $uid)->where('approvals.status', 'pending')->where('applications.status', 'pending')->count(), 'teams' => DB::table('team_user')->join('teams', 'teams.id', '=', 'team_user.team_id')->where('user_id', $uid)->select('teams.name', 'team_role')->get()];
     }
 
     public function applications(Request $r)
@@ -226,7 +222,7 @@ class AmsController extends Controller
             $distance = $proof->decoded['distance'];
             abort_unless($proof->photo && Storage::disk('local')->exists($proof->photo), 422, 'Camera verification expired. Start again.');
             $today = now('Asia/Dhaka')->toDateString();
-            $open = DB::table('attendances')->where('user_id', $uid)->whereNull('check_out')->first();
+            $open = DB::table('attendances')->where('user_id', $uid)->where('work_date', $today)->whereNull('check_out')->first();
             $existing = DB::table('attendances')->where('user_id', $uid)->where('work_date', $today)->first();
             if ($d['action'] === 'in') {
                 abort_if($open || $existing, 409, 'Already checked in today or a previous shift is still open.');
@@ -236,7 +232,8 @@ class AmsController extends Controller
                 $path = 'attendance/'.Str::uuid().'.jpg';
                 abort_unless(Storage::disk('local')->copy($proof->photo, $path), 503, 'Could not save attendance photo. Try again.');
                 try {
-                    $recordId = DB::table('attendances')->insertGetId(['user_id' => $uid, 'work_date' => $today, 'check_in' => now(), 'mode' => $home ? 'home_office' : 'office', 'in_photo' => $path, 'in_distance' => $distance, 'in_capture_hash' => $proof->capture_hash]);
+                    [$slotStart,$slotEnd] = AttendanceReport::slot($uid);
+                    $recordId = DB::table('attendances')->insertGetId(['slot_start' => $slotStart, 'slot_end' => $slotEnd, 'user_id' => $uid, 'work_date' => $today, 'check_in' => now(), 'mode' => $home ? 'home_office' : 'office', 'in_photo' => $path, 'in_distance' => $distance, 'in_capture_hash' => $proof->capture_hash]);
                 } catch (\Throwable $e) {
                     Storage::disk('local')->delete($path);
                     throw $e;
@@ -261,7 +258,36 @@ class AmsController extends Controller
 
     public function attendance(Request $r)
     {
-        return DB::table('attendances')->join('users', 'users.id', '=', 'attendances.user_id')->whereIn('user_id', $this->visible($r))->select('attendances.id', 'user_id', 'users.name', 'work_date', 'check_in', 'check_out', 'mode')->orderByDesc('attendances.id')->paginate(100)->through(fn ($row) => FaceProof::attendance($row));
+        $d = $r->validate(['start_date' => 'nullable|date_format:Y-m-d', 'end_date' => 'nullable|date_format:Y-m-d', 'user_id' => 'nullable|integer|exists:users,id']);
+        $start = $d['start_date'] ?? now('Asia/Dhaka')->startOfMonth()->toDateString();
+        $end = $d['end_date'] ?? now('Asia/Dhaka')->toDateString();
+        abort_if($end < $start || CarbonImmutable::parse($start)->diffInDays(CarbonImmutable::parse($end)) > 366, 422, 'Select a date range up to one year.');
+        abort_if($r->user()->role !== 'owner' && isset($d['user_id']) && (int) $d['user_id'] !== $r->user()->id, 403);
+        $uids = isset($d['user_id']) ? [(int) $d['user_id']] : $this->visible($r);
+        $report = AttendanceReport::build($uids, $start, $end);
+        $page = max(1, (int) $r->query('page', 1));
+        $count = count($report['data']);
+        $report['data'] = array_slice($report['data'], ($page - 1) * 100, 100);
+
+        return [...$report, 'current_page' => $page, 'last_page' => max(1, (int) ceil($count / 100)), 'total' => $count];
+    }
+
+    public function saveSlot(Request $r, string $kind, int $id)
+    {
+        $this->owner($r);
+        abort_unless(in_array($kind, ['users', 'teams']), 404);
+        abort_unless(DB::table($kind)->where('id', $id)->exists(), 404);
+        $d = $r->validate(['slot_start' => 'nullable|date_format:H:i', 'slot_end' => 'nullable|date_format:H:i', 'slot_team_id' => 'nullable|integer|exists:teams,id']);
+        $from = $d['slot_start'] ?? null;
+        $to = $d['slot_end'] ?? null;
+        abort_if((bool) $from !== (bool) $to || ($from && $from >= $to), 422, 'Enter both slot times, with end after start (same day).');
+        if ($kind === 'users' && ! empty($d['slot_team_id'])) {
+            abort_unless(DB::table('team_user')->where('user_id', $id)->where('team_id', $d['slot_team_id'])->exists(), 422, 'Select a team this user belongs to.');
+        }
+        DB::table($kind)->where('id', $id)->update(['slot_start' => $from, 'slot_end' => $to, ...($kind === 'users' ? ['slot_team_id' => $d['slot_team_id'] ?? null] : [])]);
+        W::audit($r->user()->id, 'slot.updated', $kind.':'.$id);
+
+        return ['message' => 'Work slot saved. Changes apply to future check-ins.'];
     }
 
     public function photo(Request $r, int $id, string $side)
