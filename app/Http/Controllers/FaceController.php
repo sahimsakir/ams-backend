@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class FaceController extends Controller
@@ -137,8 +138,15 @@ class FaceController extends Controller
             abort_unless(is_numeric($distance) && is_finite((float) $distance) && $distance >= 0 && is_numeric($score) && is_finite((float) $score) && $score >= 0 && $score <= 1, 503, 'Invalid verification response.');
             abort_if($distance > config('ams.threshold'), 422, 'Face does not match your enrolled profile.');
             $minimum = config('ams.live_min_score');
-            abort_unless(is_finite($minimum) && $minimum >= .9 && $minimum <= 1, 503, 'Invalid anti-spoof configuration.');
-            abort_if($score < $minimum, 422, 'Photo or screen suspected, or capture quality is insufficient. Use your live face in good lighting and retry.');
+            abort_unless(is_finite($minimum) && $minimum >= .6 && $minimum <= 1, 503, 'Invalid anti-spoof configuration.');
+            Log::info('ams.attendance.face_verification', [
+                'user_id' => $uid,
+                'result' => $score >= $minimum ? 'passed' : 'uncertain',
+                'live_score' => round((float) $score, 4),
+                'required_live_score' => $minimum,
+                'face_distance' => round((float) $distance, 4),
+            ]);
+            abort_if($score < $minimum, 422, 'We could not confirm this capture is a live face. Try brighter, even lighting and keep your face close to the camera.');
             $state['distance'] = (float) $distance;
             $state['passive_verified'] = true;
             $photo = $r->file('photo')->store('face-challenges', 'local');

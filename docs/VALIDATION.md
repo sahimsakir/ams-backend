@@ -2,7 +2,7 @@
 
 ## Passed in this workspace
 
-- Laravel/PHP suite: **39 tests, 240 assertions**, PHP 8.4.12 with in-memory SQLite.
+- Laravel/PHP suite: **42 tests, 265 assertions**, PHP 8.4.12 with in-memory SQLite.
 - Tests cover three enrollment checks, self-enrollment and owner enrollment, old-template upgrade, removal of owner photo enrollment, enrollment required for attendance, incomplete/expired/reused/wrong-user/wrong-purpose proof rejection, frozen frames, nonce reuse, face mismatch, service failure, profile reset, duplicate attendance, overnight checkout and ISO timestamp serialization.
 - Existing leave, approval, roles and login-rate-limit tests still pass.
 - Seven Python motion-rule tests pass: direction requirements, centered/open-eye front views, open/closed/open ordering, rejected static eyes, rejected head-turn-as-blink, final front view and scale-independent eye ratios.
@@ -23,3 +23,8 @@
 - Production deployment, load testing and backup restoration.
 
 The Laravel tests mock the internal face service. Python motion/PAD tests use synthetic inputs, and browser tests use a fake webcam and mocked API. These checks validate the application protocol and UI, not biometric accuracy or real-device compatibility. Test the documented HTTPS setup with your actual phones, lighting and employees before rollout. No real employee biometric data was used or included in either repository.
+
+
+## Webcam false-rejection threshold update
+
+The real-face acceptance threshold default was changed from 0.95 to the upstream demo's reference 0.60. Three added API tests verify that a valid 0.70 score can pass, 0.59 remains rejected, and configuration cannot disable the classifier. This is a code/decision-boundary check, not camera calibration. Private score/threshold/face-distance diagnostics were added without exposing scores or biometric data in API responses. The user's actual live capture has not been tested here; follow the README to collect its score if rejection persists. Reducing the cutoff trades fewer false rejections for potentially more accepted attacks, so test genuine and physical print/screen samples in the deployment environment.

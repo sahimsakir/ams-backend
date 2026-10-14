@@ -25,7 +25,7 @@ docker compose exec api php artisan test
 docker compose logs --tail=100 api worker face
 ```
 
-39 automated tests (240 assertions) passed with SQLite; Docker/PostgreSQL runtime and actual face accuracy have not been verified here. See docs/VALIDATION.md. Mailpit captures local email; configure MAIL_HOST/PORT/USERNAME/PASSWORD and FROM settings for delivery and recreate API/worker.
+42 automated tests (265 assertions) passed with SQLite; Docker/PostgreSQL runtime and actual face accuracy have not been verified here. See docs/VALIDATION.md. Mailpit captures local email; configure MAIL_HOST/PORT/USERNAME/PASSWORD and FROM settings for delivery and recreate API/worker.
 
 ## Policy
 
@@ -62,10 +62,30 @@ Enrollment uses dlib/face_recognition with geometric head-pose checks. Attendanc
 
 Rebuild **face, api and worker**, apply the new capture-hash migration, then recreate the services (use the update commands above). The face image downloads the pinned 12.27 MB `anti-spoof-mn3` ONNX model during its Docker build. The download is size/SHA-384 checked against the official Open Model Zoo manifest; a download failure or mismatched weight stops the build. At service startup, missing/changed model weights stop the face service. The weights are not committed to GitHub. Their upstream license is included in `face-service/ANTI-SPOOF-LICENSE.txt`.
 
-A user starts the camera and selects **Capture & check in/out**. Laravel requires a fresh session, enrolled face match, and model real-face score at or above `FACE_LIVE_MIN_SCORE` (default **0.95**). Missing, invalid or uncertain classification produces no attendance. Configuration below 0.90 is rejected, rather than disabling anti-spoofing. These values are starting settings, not validated operating thresholds for your cameras. Calibrate with both real faces and printed/screen-displayed attacks before use.
+A user starts the camera and selects **Capture & check in/out**. Laravel requires a fresh session, enrolled face match, and model real-face score at or above `FACE_LIVE_MIN_SCORE` (default **0.60**). Missing, invalid or uncertain classification produces no attendance. Configuration below 0.60 is rejected, rather than disabling anti-spoofing. These values are starting settings, not validated operating thresholds for your cameras. Calibrate with both real faces and printed/screen-displayed attacks before use.
 
 An exact previously used attendance image cannot be submitted again, even after its photo is pruned; private SHA-256 capture hashes are retained with timestamps. This is exact-byte replay protection, not a guarantee against a modified image. Session IDs/nonces do not attest that bytes physically originated from a real camera. The browser has no file upload option, but an attacker may call the API directly.
 
 This single-RGB-frame model is **best-effort passive presentation-attack detection**, not certified liveness. Printed photographs, screens and unseen attack types may be misclassified, and real users may be rejected. If guaranteed photo rejection is a business requirement, a normal webcam photo does not meet it; require an independently evaluated capture/PAD system or stronger verification. There is no weaker fallback that skips the classifier.
 
 Model/preprocessing references: [Open Model Zoo model](https://github.com/openvinotoolkit/open_model_zoo/tree/master/models/public/anti-spoof-mn3), [upstream demo](https://github.com/kprokofi/light-weight-face-anti-spoofing). This implementation uses the original model's RGB input, 128×128 face crop and published mean/scale, and treats output class 0 as real.
+
+
+## Genuine webcam capture rejected by the anti-spoof classifier
+
+The initial 0.95 real-face cutoff was too conservative and was not calibrated on employee webcams. The default now follows the upstream demo's spoof threshold of 0.40, equivalent to a minimum real-face score of 0.60 (the two model probabilities sum to one). This is a reference operating point, not an accuracy guarantee or calibration for your cameras. It trades some stricter rejection for fewer false rejections; test both genuine users and physical photo/screen attacks before rollout.
+
+After pulling/rebuilding API and worker, update an explicit old value in your existing `.env`:
+
+```env
+FACE_LIVE_MIN_SCORE=0.60
+```
+
+Recreate API/worker and clear cached configuration:
+
+```sh
+docker compose up -d --force-recreate api worker
+docker compose exec api php artisan optimize:clear
+```
+
+If a genuine capture is still blocked, inspect `storage/logs/laravel.log` inside the API container for `ams.attendance.face_verification`. It logs the score, threshold, face distance and outcome privately, without photos, embeddings, tokens or nonces. Share only the diagnostic line needed for troubleshooting; do not post biometric images or the full log publicly. Do not keep lowering the threshold to make an arbitrary image pass: investigate crop/preprocessing and test camera-specific attack samples. The classifier remains mandatory, fails closed when unavailable, and configuration below the reference minimum is rejected.
