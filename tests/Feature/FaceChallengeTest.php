@@ -243,36 +243,21 @@ class FaceChallengeTest extends TestCase
         $this->getJson('/api/users')->assertForbidden();
     }
 
-    public function test_photo_match_alone_does_not_allow_attendance(): void
+    public function test_one_matching_photo_completes_attendance_verification(): void
     {
         $this->enroll();
         $c = $this->start('in');
-        $this->assertSame('capture', $c['pose']);
-        $this->assertSame(2, $c['total']);
-        $next = $this->step($c)->assertOk()->json();
-        $this->assertFalse($next['complete']);
-        $this->assertContains($next['pose'], ['left', 'right']);
-        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
-        $this->assertDatabaseCount('attendances', 0);
-        $this->step($next)->assertOk()->assertJsonPath('complete', true);
+        $this->assertSame(1, $c['total']);
+        $this->serviceBody = ['distance' => .1903];
+        $this->step($c)->assertOk()->assertJsonPath('complete', true);
         $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
     }
 
-    public function test_a_failed_head_turn_records_no_attendance(): void
-    {
-        $this->enroll();
-        $c = $this->step($this->start('in'))->assertOk()->json();
-        $this->serviceStatus = 422;
-        $this->step($c)->assertUnprocessable();
-        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
-        $this->assertDatabaseCount('attendances', 0);
-    }
-
-    public function test_missing_baseline_and_unavailable_verifier_fail_closed(): void
+    public function test_invalid_face_response_and_service_failure_do_not_record_attendance(): void
     {
         $this->enroll();
         $c = $this->start('in');
-        $this->serviceBody = ['distance' => 0];
+        $this->serviceBody = [];
         $this->step($c)->assertStatus(503);
         $this->serviceStatus = 503;
         $this->step($c)->assertStatus(503);
@@ -295,14 +280,13 @@ class FaceChallengeTest extends TestCase
         $c = $this->start('in');
         $photo = $this->frames()[0];
         $c = $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json'])->assertOk()->json();
-        $this->step($c)->assertOk();
         $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
         $c = $this->start('out');
         $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json'])->assertUnprocessable();
         $this->assertDatabaseHas('attendances', ['user_id' => $this->user->id, 'check_out' => null]);
     }
 
-    public function test_low_legacy_classifier_score_does_not_block_valid_active_verification(): void
+    public function test_legacy_classifier_score_does_not_affect_face_matching(): void
     {
         $this->enroll();
         $this->serviceBody = ['distance' => .1903, 'live_score' => .0012, 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'embedding' => array_fill(0, 128, 0.0)];

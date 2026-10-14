@@ -34,20 +34,19 @@ Keep the existing `.env`, database and volumes. Do not regenerate APP_KEY, reset
 
 Every role must have a verified face profile before using workspace features. First login automatically opens a mandatory enrollment dialog. Self-enrollment has three clear prompts: look forward, look left, look right. Enrolled owners can enroll other users in person from **People → Enroll face**, after confirming identity and consent. Replacing an existing profile requires an owner reset. Older version-1 templates must upgrade through the guided flow while matching their existing template, or be reset by an owner.
 
-Attendance now uses **one photo followed by one brief random head turn**:
+Attendance uses **one camera image matched against the enrolled face**:
 
-1. Start the camera, look forward and select **Capture & check in/out**.
-2. After matching the enrolled face, the browser displays **Turn slightly LEFT/RIGHT** and counts down.
-3. Turn about 20–25 degrees in that direction and hold briefly. Four fresh frames are captured automatically. There is no blinking requirement and no extra click on the successful path.
-4. Only after face identity and the requested movement pass does the server record attendance and return its date/time. If the movement did not pass, reposition and select **Retry head-turn check**, or restart the camera.
+1. Start the camera and select **Capture & check in/out**.
+2. The server requires exactly one clearly visible face and compares its encoding with that account's enrolled templates.
+3. A successful match records attendance immediately and returns the server timestamp. There is no head-turn, blinking, liveness or passive anti-spoof requirement for attendance.
 
-A photo match alone does not authorize attendance. The session is bound to its user, enrolled template, action, nonce, expiry and single use. The server checks one face per frame, a change in landmark geometry from the initial photo, identity continuity and repeated frame hashes. Exact attendance-photo reuse remains blocked even after old photos are pruned. Photos/templates stay private, and API timestamps use UTC ISO format displayed in Asia/Dhaka. Open overnight shifts remain available for checkout.
+Sessions remain bound to the user, profile, action, nonce, expiry and single use. Face mismatches, invalid service responses, unavailable verification, expired proofs and duplicate attendance fail closed. Exact previously used image bytes cannot be reused; this does not detect a newly photographed copy of a printed/screen image. Photos/templates remain private, and UTC ISO timestamps are displayed in Asia/Dhaka. Open overnight shifts remain available for checkout.
 
-The passive RGB classifier was removed from attendance because it falsely rejected the user's real webcam capture with score 0.0012 despite a matching face. `FACE_LIVE_MIN_SCORE` is obsolete and has no effect; an old value can be removed from `.env`. The old passive-only proof is never accepted as a new attendance authorization. No ONNX/OpenCV dependency or anti-spoof weight download is required by this version.
+Enrollment stays at forward/left/right and still gates workspace access. The passive classifier and attendance head-turn checks were removed at the user's explicit request. `FACE_LIVE_MIN_SCORE` is obsolete. No ONNX/OpenCV dependency or anti-spoof weight download is needed.
 
 ## Practical limits
 
-Active head-pose verification helps reject an unchanged photograph; it is **not certified presentation-attack detection** and cannot guarantee rejection of perspective-distorted photographs, recordings, deepfakes or virtual cameras. API uploads cannot attest the physical source of camera frames. A first enrollment establishes the account's template; it does not independently verify a government identity or prevent account sharing. Physical camera compatibility, pose thresholds, accessibility and attack rejection must be tested with your employees and devices. The real webcam after this update has not been verified in this workspace. There is no photo-only bypass.
+**Face-only attendance has no protection against presentation attacks.** A printed or screen-displayed image of the enrolled person can match and be accepted. Re-encoding or photographing an old image bypasses exact-byte replay detection. Login/profile requirements do not establish physical presence. Camera/model accuracy still needs testing on real devices; no guarantee that every genuine capture will match is made.
 
 For phones/tablets, follow the frontend README's trusted HTTPS setup. Production requires a real PHP server, HTTPS, backups and a same-origin gateway allowing 12 MB request bodies and 120-second upstream timeouts. Never expose the internal face service.
 
@@ -65,4 +64,4 @@ docker compose exec face python -m unittest discover -p 'test_*.py'
 docker compose logs --tail=100 api worker face
 ```
 
-41 Laravel tests / 267 assertions, seven Python motion tests and four browser tests pass. TypeScript/Vite build passes. Tests mock face inference or use synthetic geometry/fake cameras; they do not establish real-device accuracy. Docker image builds and PostgreSQL concurrency were not verified here. See [docs/VALIDATION.md](docs/VALIDATION.md) and [docs/API.md](docs/API.md).
+40 Laravel tests / 245 assertions, seven Python motion tests and four browser tests pass. TypeScript/Vite build passes. Tests mock face inference or use synthetic geometry/fake cameras; they do not establish real-device accuracy. Docker image builds and PostgreSQL concurrency were not verified here. See [docs/VALIDATION.md](docs/VALIDATION.md) and [docs/API.md](docs/API.md).

@@ -39,7 +39,7 @@ class FaceController extends Controller
             }
             // Starting again revokes old challenges, including completed but unused ones.
             DB::table('face_challenges')->where(fn ($q) => $q->where('subject_id', $subject)->orWhere(fn ($q) => $q->whereNull('subject_id')->where('user_id', $subject)))->whereNull('consumed_at')->update(['expires_at' => now()]);
-            $steps = $d['purpose'] === 'enroll' ? ['front', 'left', 'right'] : ['capture', random_int(0, 1) ? 'left' : 'right'];
+            $steps = $d['purpose'] === 'enroll' ? ['front', 'left', 'right'] : ['capture'];
             $state = ['templates' => [], 'hashes' => [], 'baseline' => null, 'distance' => 0];
             if ($profile) {
                 $known = json_decode(Crypt::decryptString($profile->embedding), true);
@@ -65,7 +65,7 @@ class FaceController extends Controller
             FaceProof::lockUsers($uid, $subject);
             $c = DB::table('face_challenges')->where('id', $id)->where('user_id', $uid)->lockForUpdate()->first();
             abort_unless($c, 404);
-            abort_unless($c->purpose === 'enroll' || ($c->step === 1 && $c->photo && $c->capture_hash), 422, 'Capture your face before the head-turn check.');
+            abort_unless($c->purpose === 'enroll', 422, 'This endpoint is for face enrollment only.');
             abort_if($c->consumed_at || $c->completed_at || CarbonImmutable::parse($c->expires_at)->isPast(), 422, 'Camera session expired. Restart the camera.');
             abort_unless(hash_equals($c->nonce, $d['nonce']), 409, 'This step was already submitted. Restart the camera.');
             abort_unless($c->profile_hash === FaceProof::profileHash(DB::table('face_profiles')->where('user_id', $subject)->first()), 422, 'Profile changed. Restart the camera.');
@@ -103,9 +103,6 @@ class FaceController extends Controller
                 $photo = $r->file('frames')[0]->store('face-challenges', 'local');
             }
             $complete = $c->step + 1 === count($steps);
-            if ($complete && $c->purpose !== 'enroll') {
-                $state['active_verified'] = true;
-            }
             DB::table('face_challenges')->where('id', $id)->update(['state' => Crypt::encryptString(json_encode($state)), 'photo' => $photo, 'step' => $c->step + 1, 'nonce' => Str::random(48), 'updated_at' => now(), 'completed_at' => $complete ? now() : null, 'expires_at' => $complete ? now()->addMinutes(2) : $c->expires_at]);
 
             return $this->view(DB::table('face_challenges')->where('id', $id)->first());
@@ -137,14 +134,13 @@ class FaceController extends Controller
             abort_if($response->serverError(), 503, 'Face verification unavailable. No attendance recorded.');
             abort_unless($response->successful(), 422, 'Face not verified. Use your own clear face in good lighting.');
             $distance = $response->json('distance');
-            $baseline = $response->json('baseline');
-            abort_unless(is_numeric($distance) && is_finite((float) $distance) && $distance >= 0 && is_array($baseline) && isset($baseline['yaw'],$baseline['pitch'],$baseline['ear']) && collect($baseline)->every(fn ($n) => is_numeric($n) && is_finite((float) $n)), 503, 'Invalid verification response.');
+            abort_unless(is_numeric($distance) && is_finite((float) $distance) && $distance >= 0, 503, 'Invalid face verification response.');
             abort_if($distance > config('ams.threshold'), 422, 'Face does not match your enrolled profile.');
             $state['distance'] = (float) $distance;
-            $state['baseline'] = $baseline;
+            $state['face_verified'] = true;
             $state['hashes'] = [$hash];
             $photo = $r->file('photo')->store('face-challenges', 'local');
-            DB::table('face_challenges')->where('id', $id)->update(['state' => Crypt::encryptString(json_encode($state)), 'photo' => $photo, 'capture_hash' => $hash, 'step' => 1, 'nonce' => Str::random(48), 'completed_at' => null, 'updated_at' => now(), 'expires_at' => now()->addMinutes(2)]);
+            DB::table('face_challenges')->where('id', $id)->update(['state' => Crypt::encryptString(json_encode($state)), 'photo' => $photo, 'capture_hash' => $hash, 'step' => 1, 'nonce' => Str::random(48), 'completed_at' => now(), 'updated_at' => now(), 'expires_at' => now()->addMinutes(2)]);
 
             return $this->view(DB::table('face_challenges')->where('id', $id)->first());
         });

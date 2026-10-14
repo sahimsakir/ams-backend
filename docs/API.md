@@ -23,8 +23,8 @@ Base: `http://localhost:8000/api`. JSON errors have `message` and, for validatio
 | POST | /users | owner: name, email, role, active, password (12+), optional designation/phone |
 | PUT | /users/{id} | owner: same fields; password optional |
 | POST | /face/challenges | purpose enroll/in/out, consent true; owner may supply user_id for another user’s enrollment |
-| POST | /face/challenges/{id}/step | enrollment or attendance head turn: nonce plus frames[] (4–16 JPEG frames, ≤512 KiB each) |
-| POST | /face/challenges/{id}/capture | attendance only: multipart nonce plus one photo (JPEG ≤1 MiB); matches face and starts head-turn prompt |
+| POST | /face/challenges/{id}/step | enrollment only: nonce plus frames[] (4–16 JPEG frames, ≤512 KiB each) |
+| POST | /face/challenges/{id}/capture | attendance only: multipart nonce plus one photo (JPEG ≤1 MiB); matches the photo against the enrolled face and completes the attendance proof |
 | POST | /face/enroll | challenge_id; enroll session subject after all three steps pass |
 | DELETE | /users/{id}/face | owner: reset template and invalidate outstanding challenges |
 | GET | /leave-types | list policy types |
@@ -60,9 +60,9 @@ Start `/face/challenges` with purpose `enroll`, `in` or `out` and consent true. 
 
 Enrollment uses front, left and right. Send a fresh burst of at least four JPEG frames and the current nonce to `/face/challenges/{id}/step`. The server verifies identity and pose and only then advances the nonce/step. Once complete, send `challenge_id` to `/face/enroll`. An enrolled owner can specify `user_id` when starting enrollment for another active user, but employees cannot enroll others. The session is bound to both actor and subject. Existing verified profiles need an owner reset before replacement; legacy templates require matching guided upgrade or reset.
 
-Attendance uses `capture` followed by one random left/right pose. Send one JPEG and nonce to `/face/challenges/{id}/capture`. A successful photo match returns `complete: false`, `step: 1`, a new nonce and the head-turn prompt. Its private original photo/landmark baseline is retained. Send four fresh frames with that nonce to `/step`. Only a matching face completing the requested landmark change yields a completed active proof. Then send `challenge_id` and the matching action to `/attendance`.
+Attendance has one `capture` step. Send one JPEG and nonce to `/face/challenges/{id}/capture`. A successful enrolled-face match returns `complete: true`. Send that `challenge_id` with action `in`/`out` to `/attendance` to record the server timestamp. There is no attendance head-turn, blink or liveness check. The `/step` endpoint is enrollment-only.
 
-A photo match alone, skipped movement, repeated nonce, frozen/duplicate frames, old passive-classifier proof, expired session, changed profile, another user's proof or wrong action cannot create attendance. The backend never accepts client matching scores, completion flags or pose results. The single-frame anti-spoof classifier and its threshold were removed after a real webcam false rejection; the active head-turn check is mandatory instead. No eye closing is required. An unchanged photograph cannot satisfy the implemented landmark-change rule, but perspective distortion, multiple pose images, video replay and virtual cameras are not guaranteed to be rejected.
+An unmatched face, invalid response, unavailable service, repeated nonce, expired session, changed profile, another user's proof or wrong action cannot record attendance. Face match scores/completion flags are not accepted from the browser. Exact previous attendance-image bytes remain blocked, but a newly captured photograph of a printed/displayed face can pass. Face-only matching is not physical-presence verification. Old incomplete/obsolete proofs require a fresh camera session.
 
 Attendance returns full server-assigned timestamps, for example `{ "message": "Checked in successfully", "attendance": { "id": 1, "user_id": 2, "work_date": "2026-10-13", "check_in": "2026-10-13T03:15:30.000000Z", "check_out": null, "mode": "office" } }`. Dashboard/list use the same ISO format. Private paths, matching scores and capture hashes are omitted. Exact prior attendance-photo reuse is rejected.
 

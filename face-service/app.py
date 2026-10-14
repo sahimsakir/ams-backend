@@ -87,5 +87,4 @@ def verify_capture(photo: UploadFile = File(...), known: str = Form(...), thresh
             raise ValueError('Face mismatch')
     except Exception:
         raise HTTPException(422, 'Face not verified. Use one clear face matching your enrolled profile.')
-    baseline = metrics(face_recognition.face_landmarks(pixels, boxes, model='large')[0])
-    return {'distance': distance, 'baseline': baseline}
+    return {'distance': distance}
