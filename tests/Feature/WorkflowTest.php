@@ -8,6 +8,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
@@ -234,5 +235,47 @@ class WorkflowTest extends TestCase
         }
         $this->postJson('/api/logout')->assertOk();
         $this->postJson('/api/login', ['email' => $this->employee->email, 'password' => 'secure-password-123'])->assertOk();
+    }
+
+    public function test_owner_manages_leave_types_and_archived_type_cannot_be_used(): void
+    {
+        $this->asUser($this->employee)->deleteJson('/api/leave-types/'.$this->leave)->assertForbidden();
+        $this->asUser($this->owner)->putJson('/api/leave-types/'.$this->leave, ['name' => 'Updated', 'annual_limit' => 12])->assertOk();
+        $this->deleteJson('/api/leave-types/'.$this->leave)->assertOk();
+        $this->getJson('/api/leave-types')->assertJsonCount(0);
+        $this->asUser($this->employee)->postJson('/api/applications', $this->payload())->assertUnprocessable();
+    }
+
+    public function test_user_deletion_revokes_access_and_preserves_account_history(): void
+    {
+        $this->asUser($this->owner)->deleteJson('/api/users/'.$this->owner->id)->assertUnprocessable();
+        $this->deleteJson('/api/users/'.$this->employee->id)->assertOk();
+        $this->assertSoftDeleted('users', ['id' => $this->employee->id]);
+        $this->assertDatabaseMissing('face_profiles', ['user_id' => $this->employee->id]);
+        $this->postJson('/api/login', ['email' => $this->employee->email, 'password' => 'secure-password-123'])->assertUnauthorized();
+    }
+
+    public function test_csv_import_is_atomic_and_owner_only(): void
+    {
+        $csv = "name,email,password,role,active\nNew User,new@example.com,long-password-123,employee,true\nBad,bad-email,long-password-123,employee,true\n";
+        $file = UploadedFile::fake()->createWithContent('users.csv', $csv);
+        $this->asUser($this->employee)->post('/api/users/import', ['file' => $file], ['Accept' => 'application/json'])->assertForbidden();
+        $this->asUser($this->owner)->post('/api/users/import', ['file' => $file], ['Accept' => 'application/json'])->assertUnprocessable();
+        $this->assertDatabaseMissing('users', ['email' => 'new@example.com']);
+        $file = UploadedFile::fake()->createWithContent('users.csv', "name,email,password\nNew User,new@example.com,long-password-123\n");
+        $this->post('/api/users/import', ['file' => $file], ['Accept' => 'application/json'])->assertOk()->assertJsonPath('count', 1);
+        $this->assertTrue(Hash::check('long-password-123', User::where('email', 'new@example.com')->first()->password));
+    }
+
+    public function test_overtime_date_range_document_is_private(): void
+    {
+        Storage::fake('local');
+        $data = $this->payload(['kind' => 'overtime', 'leave_type_id' => null, 'end_date' => '2026-10-20', 'minutes' => 180, 'document' => UploadedFile::fake()->image('approval.png')]);
+        $id = $this->asUser($this->employee)->post('/api/applications', $data, ['Accept' => 'application/json'])->assertCreated()->json('id');
+        $this->get('/api/applications/'.$id.'/document')->assertOk();
+        $this->asUser($this->lead)->get('/api/applications/'.$id.'/document')->assertOk();
+        $other = $this->makeUser('employee');
+        $this->asUser($other)->get('/api/applications/'.$id.'/document')->assertNotFound();
+        $this->assertDatabaseHas('applications', ['id' => $id, 'minutes' => 180, 'end_date' => '2026-10-20']);
     }
 }

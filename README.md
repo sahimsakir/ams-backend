@@ -65,3 +65,19 @@ docker compose logs --tail=100 api worker face
 ```
 
 40 Laravel tests / 245 assertions, seven Python motion tests and four browser tests pass. TypeScript/Vite build passes. Tests mock face inference or use synthetic geometry/fake cameras; they do not establish real-device accuracy. Docker image builds and PostgreSQL concurrency were not verified here. See [docs/VALIDATION.md](docs/VALIDATION.md) and [docs/API.md](docs/API.md).
+
+### Application forms and owner administration
+
+Leave requests support emergency contact, covering person and an optional private JPG/PNG/PDF document (15 MB). Overtime supports first/last dates, total minutes (1–1440 per request), reason and a required approval document. All assigned reviewers still approve through the email workflow. Downloads require an authenticated applicant, assigned reviewer or owner.
+
+Owners can edit and delete leave types and users. Deleted types are unavailable for new requests; historical records remain. Deleted users lose tokens, team memberships and face templates. Resolve pending applications/reviews before deleting a user. Self-deletion is blocked. CSV import is create-only, atomic, up to 500 rows/2 MB: required headers `name,email,password`; optional `role,active,designation,phone`. Roles: owner,manager,pm,team_lead,employee. Passwords: 12+ characters. Active: true/false or 1/0. Duplicate emails (including archived accounts) reject the import. Users enroll faces after login.
+
+Update this release:
+```bash
+git pull --ff-only
+docker compose build api worker
+docker compose run --rm api php artisan migrate --force
+docker compose up -d --force-recreate api worker
+docker compose exec api php artisan optimize:clear
+```
+Keep your existing `.env`, `APP_KEY` and database volume. Also pull and restart the frontend.

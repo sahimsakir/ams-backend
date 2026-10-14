@@ -66,14 +66,14 @@ class AmsController extends Controller
 
     public function leaveTypes()
     {
-        return DB::table('leave_types')->orderBy('name')->get();
+        return DB::table('leave_types')->whereNull('deleted_at')->orderBy('name')->get();
     }
 
     public function dashboard(Request $r)
     {
         $uid = $r->user()->id;
         $year = now('Asia/Dhaka')->year;
-        $balances = DB::table('leave_types')->get()->map(function ($t) use ($uid, $year) {
+        $balances = DB::table('leave_types')->whereNull('deleted_at')->get()->map(function ($t) use ($uid, $year) {
             $base = DB::table('applications')->where('user_id', $uid)->where('leave_type_id', $t->id)->whereYear('start_date', $year);
             $t->used = (clone $base)->where('status', 'approved')->sum('days');
             $t->reserved = (clone $base)->where('status', 'pending')->sum('days');
@@ -95,6 +95,8 @@ class AmsController extends Controller
         $ids = collect($items->items())->pluck('id');
         $approvals = DB::table('approvals')->join('users', 'users.id', '=', 'approvals.reviewer_id')->whereIn('application_id', $ids)->select('approvals.*', 'users.name')->get()->groupBy('application_id');
         foreach ($items as $item) {
+            $item->has_document = (bool) $item->document;
+            unset($item->document);
             $item->approvals = $approvals->get($item->id, collect());
         }
 
@@ -103,7 +105,7 @@ class AmsController extends Controller
 
     public function apply(Request $r)
     {
-        $d = $r->validate(['kind' => 'required|in:leave,home_office,overtime', 'leave_type_id' => 'nullable|exists:leave_types,id', 'start_date' => 'required|date_format:Y-m-d', 'end_date' => 'nullable|date_format:Y-m-d|after_or_equal:start_date', 'reason' => 'required|string|min:5|max:4000', 'contact' => 'nullable|string|max:100', 'covering' => 'nullable|string|max:100', 'minutes' => 'nullable|integer|min:1|max:1440']);
+        $d = $r->validate(['kind' => 'required|in:leave,home_office,overtime', 'leave_type_id' => ['nullable', Rule::exists('leave_types', 'id')->whereNull('deleted_at')], 'start_date' => 'required|date_format:Y-m-d', 'end_date' => 'nullable|date_format:Y-m-d|after_or_equal:start_date', 'reason' => 'required|string|min:5|max:4000', 'document' => 'required_if:kind,overtime|nullable|file|mimes:jpg,jpeg,png,pdf|max:15360', 'contact' => 'nullable|string|max:100', 'covering' => 'nullable|string|max:100', 'minutes' => 'nullable|integer|min:1|max:1440']);
         $uid = $r->user()->id;
         $end = $d['end_date'] ?? null;
         if ($d['kind'] !== 'home_office' && ! $end) {
@@ -115,39 +117,50 @@ class AmsController extends Controller
         if ($d['kind'] === 'leave' && (! $r->leave_type_id || substr($d['start_date'], 0, 4) !== substr($end, 0, 4))) {
             W::fail('Select a leave type and submit each calendar year separately.');
         }
-        if ($d['kind'] === 'overtime' && (! $r->minutes || $d['start_date'] !== $end)) {
-            W::fail('Submit overtime for one date with total minutes.');
+        if ($d['kind'] === 'overtime' && ! $r->minutes) {
+            W::fail('Enter total overtime minutes for this date range.');
         }
-        $id = DB::transaction(function () use ($d, $uid, $end) {
-            DB::table('users')->where('id', $uid)->lockForUpdate()->first();
-            $conflicts = DB::table('applications')->where('user_id', $uid)->whereIn('status', ['pending', 'approved'])->where('start_date', '<=', $end ?? '9999-12-31')->where(fn ($q) => $q->whereNull('end_date')->orWhere('end_date', '>=', $d['start_date']));
-            if ($d['kind'] === 'overtime') {
-                $conflicts->whereIn('kind', ['leave', 'overtime']);
-            } elseif ($d['kind'] === 'leave') {
-                $conflicts->whereIn('kind', ['leave', 'overtime']);
-            } else {
-                $conflicts->where('kind', 'home_office');
-            }
-            if ($conflicts->exists()) {
-                W::fail('This overlaps an existing pending or approved request.');
-            }
-            $days = $end ? W::days($d['start_date'], $end) : 0;
-            if ($d['kind'] === 'leave') {
-                $t = DB::table('leave_types')->where('id', $d['leave_type_id'])->first();
-                $used = DB::table('applications')->where('user_id', $uid)->where('leave_type_id', $t->id)->whereIn('status', ['pending', 'approved'])->whereYear('start_date', substr($d['start_date'], 0, 4))->sum('days');
-                if (! $days || $days + $used > $t->annual_limit) {
-                    W::fail('Insufficient leave balance or no working days selected.');
+        $upload = $d['document'] ?? null;
+        unset($d['document']);
+        $path = $upload ? $upload->store('application-documents', 'local') : null;
+        try {
+            $id = DB::transaction(function () use ($d, $uid, $end, $path, $upload) {
+                DB::table('users')->where('id', $uid)->lockForUpdate()->first();
+                $conflicts = DB::table('applications')->where('user_id', $uid)->whereIn('status', ['pending', 'approved'])->where('start_date', '<=', $end ?? '9999-12-31')->where(fn ($q) => $q->whereNull('end_date')->orWhere('end_date', '>=', $d['start_date']));
+                if ($d['kind'] === 'overtime') {
+                    $conflicts->whereIn('kind', ['leave', 'overtime']);
+                } elseif ($d['kind'] === 'leave') {
+                    $conflicts->whereIn('kind', ['leave', 'overtime']);
+                } else {
+                    $conflicts->where('kind', 'home_office');
                 }
-            }
-            $reviewers = W::reviewers($uid);
-            $id = DB::table('applications')->insertGetId([...$d, 'leave_type_id' => $d['kind'] === 'leave' ? $d['leave_type_id'] : null, 'minutes' => $d['kind'] === 'overtime' ? $d['minutes'] : null, 'end_date' => $end, 'user_id' => $uid, 'days' => $days, 'status' => 'pending', 'created_at' => now(), 'updated_at' => now()]);
-            foreach ($reviewers as $rid) {
-                DB::table('approvals')->insert(['application_id' => $id, 'reviewer_id' => $rid, 'status' => 'pending']);
-                User::find($rid)->notify(new ApplicationNotice($id, 'A request is waiting for your review.'));
-            }W::audit($uid, 'application.submitted', (string) $id);
+                if ($conflicts->exists()) {
+                    W::fail('This overlaps an existing pending or approved request.');
+                }
+                $days = $end ? W::days($d['start_date'], $end) : 0;
+                if ($d['kind'] === 'leave') {
+                    $t = DB::table('leave_types')->where('id', $d['leave_type_id'])->whereNull('deleted_at')->lockForUpdate()->first();
+                    abort_unless($t, 422, 'Leave type is no longer available.');
+                    $used = DB::table('applications')->where('user_id', $uid)->where('leave_type_id', $t->id)->whereIn('status', ['pending', 'approved'])->whereYear('start_date', substr($d['start_date'], 0, 4))->sum('days');
+                    if (! $days || $days + $used > $t->annual_limit) {
+                        W::fail('Insufficient leave balance or no working days selected.');
+                    }
+                }
+                $reviewers = W::reviewers($uid);
+                $id = DB::table('applications')->insertGetId([...$d, 'document' => $path, 'document_name' => $upload ? basename($upload->getClientOriginalName()) : null, 'leave_type_id' => $d['kind'] === 'leave' ? $d['leave_type_id'] : null, 'minutes' => $d['kind'] === 'overtime' ? $d['minutes'] : null, 'end_date' => $end, 'user_id' => $uid, 'days' => $days, 'status' => 'pending', 'created_at' => now(), 'updated_at' => now()]);
+                foreach ($reviewers as $rid) {
+                    DB::table('approvals')->insert(['application_id' => $id, 'reviewer_id' => $rid, 'status' => 'pending']);
+                    User::find($rid)->notify(new ApplicationNotice($id, 'A request is waiting for your review.'));
+                }W::audit($uid, 'application.submitted', (string) $id);
 
-            return $id;
-        });
+                return $id;
+            });
+
+        } catch (\Throwable $e) {
+            if ($path) {
+                Storage::disk('local')->delete($path);
+            } throw $e;
+        }
 
         return response()->json(['id' => $id, 'message' => 'Submitted for approval'], 201);
     }
@@ -166,7 +179,7 @@ class AmsController extends Controller
             $status = $d['decision'] === 'rejected' ? 'rejected' : (DB::table('approvals')->where('application_id', $id)->where('status', '!=', 'approved')->exists() ? 'pending' : 'approved');
             DB::table('applications')->where('id', $id)->update(['status' => $status, 'updated_at' => now()]);
             W::audit($r->user()->id, 'application.'.$d['decision'], (string) $id);
-            User::find($a->user_id)->notify(new ApplicationNotice($id, 'Your request status: '.$status));
+            User::find($a->user_id)?->notify(new ApplicationNotice($id, 'Your request status: '.$status));
         });
 
         return ['message' => 'Decision recorded'];
@@ -182,7 +195,7 @@ class AmsController extends Controller
             DB::table('applications')->where('id', $id)->update(['status' => 'cancelled', 'updated_at' => now()]);
             W::audit($r->user()->id, 'application.cancelled', (string) $id);
             foreach (DB::table('approvals')->where('application_id', $id)->pluck('reviewer_id')->push($a->user_id)->unique() as $uid) {
-                User::find($uid)->notify(new ApplicationNotice($id, 'This request was cancelled or its home-office arrangement revoked.'));
+                User::find($uid)?->notify(new ApplicationNotice($id, 'This request was cancelled or its home-office arrangement revoked.'));
             }
         });
 
@@ -327,13 +340,100 @@ class AmsController extends Controller
         return ['message' => 'Team assignments saved'];
     }
 
-    public function saveLeaveType(Request $r)
+    public function saveLeaveType(Request $r, ?int $id = null)
     {
         $this->owner($r);
-        $d = $r->validate(['name' => 'required|string|max:100|unique:leave_types', 'annual_limit' => 'required|integer|min:0|max:366']);
-        DB::table('leave_types')->insert([...$d, 'created_at' => now(), 'updated_at' => now()]);
+        $d = $r->validate(['name' => ['required', 'string', 'max:100', Rule::unique('leave_types')->ignore($id)], 'annual_limit' => 'required|integer|min:0|max:366']);
+        if ($id) {
+            abort_unless(DB::table('leave_types')->where('id', $id)->whereNull('deleted_at')->exists(), 404);
+            DB::table('leave_types')->where('id', $id)->update([...$d, 'updated_at' => now()]);
+        } else {
+            DB::table('leave_types')->insert([...$d, 'created_at' => now(), 'updated_at' => now()]);
+        }
+        W::audit($r->user()->id, 'leave_type.saved', (string) ($id ?? $d['name']));
 
-        return ['message' => 'Leave type created'];
+        return ['message' => 'Leave type saved'];
+    }
+
+    public function deleteLeaveType(Request $r, int $id)
+    {
+        $this->owner($r);
+        abort_unless(DB::table('leave_types')->where('id', $id)->whereNull('deleted_at')->exists(), 404);
+        DB::table('leave_types')->where('id', $id)->update(['deleted_at' => now(), 'updated_at' => now()]);
+        W::audit($r->user()->id, 'leave_type.deleted', (string) $id);
+
+        return ['message' => 'Leave type deleted; past requests retained'];
+    }
+
+    public function deleteUser(Request $r, int $id)
+    {
+        $this->owner($r);
+        abort_if($id === $r->user()->id, 422, 'You cannot delete your own account.');
+        DB::transaction(function () use ($r, $id) {
+            $u = User::lockForUpdate()->findOrFail($id);
+            abort_if(DB::table('approvals')->join('applications', 'applications.id', '=', 'approvals.application_id')->where('reviewer_id', $id)->where('approvals.status', 'pending')->where('applications.status', 'pending')->exists(), 422, 'Resolve pending reviews before deleting this user.');
+            abort_if(DB::table('applications')->where('user_id', $id)->where('status', 'pending')->exists(), 422, 'Resolve or cancel pending applications before deleting this user.');
+            $u->update(['active' => false]);
+            $u->delete();
+            DB::table('access_tokens')->where('user_id', $id)->delete();
+            DB::table('team_user')->where('user_id', $id)->delete();
+            DB::table('face_profiles')->where('user_id', $id)->delete();
+            DB::table('face_challenges')->where(fn ($q) => $q->where('user_id', $id)->orWhere('subject_id', $id))->update(['expires_at' => now()]);
+            W::audit($r->user()->id, 'user.deleted', (string) $id);
+        });
+
+        return ['message' => 'User deleted; historical records retained'];
+    }
+
+    public function importUsers(Request $r)
+    {
+        $this->owner($r);
+        $r->validate(['file' => 'required|file|max:2048']);
+        $f = fopen($r->file('file')->path(), 'r');
+        $header = fgetcsv($f, 0, ',', '"', '');
+        abort_unless($header, 422, 'CSV is empty.');
+        $header = array_map(fn ($v) => trim($v, " \t\n\r\0\x0B\xEF\xBB\xBF"), $header);
+        $allowed = ['name', 'email', 'password', 'role', 'active', 'designation', 'phone'];
+        abort_unless(count($header) === count(array_unique($header)) && ! array_diff($header, $allowed) && ! array_diff(['name', 'email', 'password'], $header), 422, 'Use CSV columns name,email,password,role,active,designation,phone.');
+        $rows = [];
+        $emails = [];
+        $line = 1;
+        while (($values = fgetcsv($f, 0, ',', '"', '')) !== false) {
+            $line++;
+            if ($values === [null]) {
+                continue;
+            }
+            abort_if(count($rows) >= 500 || count($values) !== count($header), 422, "Invalid CSV row $line (maximum 500 users).");
+            $row = array_combine($header, $values);
+            $row['email'] = strtolower(trim($row['email']));
+            $row['role'] = $row['role'] ?? 'employee';
+            $row['active'] = $row['active'] ?? 'true';
+            abort_unless(in_array(strtolower($row['active']), ['true', 'false', '1', '0'], true), 422, "Invalid active value on row $line.");
+            $row['active'] = in_array(strtolower($row['active']), ['true', '1'], true);
+            $v = validator($row, ['name' => 'required|string|max:150', 'email' => 'required|email|max:255|unique:users', 'password' => 'required|string|min:12', 'role' => 'required|in:owner,manager,pm,team_lead,employee', 'designation' => 'nullable|string|max:150', 'phone' => 'nullable|string|max:50']);
+            abort_if($v->fails(), 422, "CSV row $line: ".$v->errors()->first());
+            abort_if(isset($emails[$row['email']]), 422, "Duplicate email on row $line.");
+            $emails[$row['email']] = true;
+            $rows[] = $row;
+        }
+        fclose($f);
+        abort_unless($rows, 422, 'CSV has no users.');
+        DB::transaction(function () use ($rows, $r) {
+            foreach ($rows as $row) {
+                User::create($row);
+            } W::audit($r->user()->id, 'users.imported', (string) count($rows));
+        });
+
+        return ['message' => count($rows).' users imported', 'count' => count($rows)];
+    }
+
+    public function document(Request $r, int $id)
+    {
+        $a = DB::table('applications')->where('id', $id)->first();
+        abort_unless($a && ($r->user()->role === 'owner' || $a->user_id === $r->user()->id || DB::table('approvals')->where('application_id', $id)->where('reviewer_id', $r->user()->id)->exists()), 404);
+        abort_unless($a->document && Storage::disk('local')->exists($a->document), 404);
+
+        return Storage::disk('local')->download($a->document, $a->document_name, ['Cache-Control' => 'private, no-store', 'X-Content-Type-Options' => 'nosniff']);
     }
 
     public function calendar()
