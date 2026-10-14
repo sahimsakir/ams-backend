@@ -6,7 +6,7 @@
 - Tests cover three enrollment checks, self-enrollment and owner enrollment, old-template upgrade, removal of owner photo enrollment, enrollment required for attendance, incomplete/expired/reused/wrong-user/wrong-purpose proof rejection, frozen frames, nonce reuse, face mismatch, service failure, profile reset, duplicate attendance, overnight checkout and ISO timestamp serialization.
 - Existing leave, approval, roles and login-rate-limit tests still pass.
 - Seven Python motion-rule tests pass: direction requirements, centered/open-eye front views, open/closed/open ordering, rejected static eyes, rejected head-turn-as-blink, final front view and scale-independent eye ratios.
-- Five passive-classifier tests pass for normalization, class order, malformed probabilities and fail-closed model files. The real pinned ONNX model was loaded on CPU and a synthetic-input inference completed; this is a runtime smoke check, not an accuracy measurement.
+- Six passive-classifier tests pass for normalization, class order, malformed probabilities and fail-closed model files. The real pinned ONNX model was loaded on CPU and a synthetic-input inference completed; this is a runtime smoke check, not an accuracy measurement.
 - PHP tests reject low/missing/invalid anti-spoof scores, unavailable inference, reused photos and old motion-only proofs.
 - Python face-service syntax compilation and Laravel Pint formatting pass.
 - TypeScript strict compile and Vite production build pass.
@@ -28,3 +28,8 @@ The Laravel tests mock the internal face service. Python motion/PAD tests use sy
 ## Webcam false-rejection threshold update
 
 The real-face acceptance threshold default was changed from 0.95 to the upstream demo's reference 0.60. Three added API tests verify that a valid 0.70 score can pass, 0.59 remains rejected, and configuration cannot disable the classifier. This is a code/decision-boundary check, not camera calibration. Private score/threshold/face-distance diagnostics were added without exposing scores or biometric data in API responses. The user's actual live capture has not been tested here; follow the README to collect its score if rejection persists. Reducing the cutoff trades fewer false rejections for potentially more accepted attacks, so test genuine and physical print/screen samples in the deployment environment.
+
+
+## Reference preprocessing alignment
+
+The ONNX/PyTorch preprocessing now uses OpenCV cubic resizing, matching the original model demo instead of Pillow bilinear resizing. A textured-input test verifies RGB order, crop bounds, resize and normalization against the reference tensor. All 13 Python tests and a pinned-model CPU inference smoke check pass. The actual reported webcam capture is not available as a raw model input; this change does not establish that it will be accepted or measure physical attack rejection. Inspect the private score/active-threshold log if rejection remains.

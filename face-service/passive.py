@@ -4,7 +4,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 import numpy as np
-from PIL import Image
+import cv2
 from download_pad import MODEL_SHA384
 
 MEAN = np.array([151.2405, 119.5950, 107.8395], dtype=np.float32)
@@ -15,7 +15,8 @@ def prepare_face(rgb, box):
     height, width = rgb.shape[:2]
     crop = rgb[max(0,top):min(height,bottom), max(0,left):min(width,right)]
     if not crop.size: raise ValueError('Invalid face crop')
-    pixels = np.asarray(Image.fromarray(crop).resize((128,128), Image.Resampling.BILINEAR), dtype=np.float32)
+    # Match the original Torch/ONNX pipeline, whose texture classifier uses cubic resizing.
+    pixels = cv2.resize(crop, (128,128), interpolation=cv2.INTER_CUBIC).astype(np.float32)
     return np.ascontiguousarray(((pixels-MEAN)/SCALE).transpose(2,0,1)[None])
 
 def real_probability(output):

@@ -89,3 +89,24 @@ docker compose exec api php artisan optimize:clear
 ```
 
 If a genuine capture is still blocked, inspect `storage/logs/laravel.log` inside the API container for `ams.attendance.face_verification`. It logs the score, threshold, face distance and outcome privately, without photos, embeddings, tokens or nonces. Share only the diagnostic line needed for troubleshooting; do not post biometric images or the full log publicly. Do not keep lowering the threshold to make an arbitrary image pass: investigate crop/preprocessing and test camera-specific attack samples. The classifier remains mandatory, fails closed when unavailable, and configuration below the reference minimum is rejected.
+
+
+## Model input resizing correction
+
+The original ONNX model's PyTorch reference pipeline resizes face crops with OpenCV `INTER_CUBIC`. The first integration used Pillow bilinear resizing, which can alter image texture cues. This has been corrected to cubic resizing with pinned headless OpenCV, keeping RGB normalization, face matching and the anti-spoof threshold intact. A test compares the resulting tensor against the reference preprocessing on non-uniform pixels. This alignment is not proof that an individual camera will pass.
+
+Pull the backend, rebuild **face**, recreate it, then retry a new capture:
+
+```sh
+git pull --ff-only
+docker compose build face
+docker compose up -d --force-recreate face
+```
+
+If it still rejects a real person, obtain the latest score/threshold diagnostic rather than lowering thresholds blindly:
+
+```sh
+docker compose exec api sh -lc 'grep "ams.attendance.face_verification" storage/logs/laravel.log | tail -n 1'
+```
+
+If `required_live_score` is still `0.95`, follow the threshold-update section above. If the actual live score is below the active reference threshold, the classifier may not generalize to that camera/setup; a screenshot of its preview is not the raw camera input and cannot safely be used to calibrate photo-attack rejection. A different validated PAD/capture method may be necessary. There is no automatic acceptance fallback.
