@@ -9,15 +9,10 @@ import face_recognition
 from PIL import Image
 from fastapi import FastAPI, File, Form, UploadFile, Header, HTTPException
 from motion import metrics, verify_motion
-from passive import live_score, model as passive_model
 
 app = FastAPI(docs_url=None, redoc_url=None)
 Image.MAX_IMAGE_PIXELS = 12_000_000
 warnings.simplefilter("error", Image.DecompressionBombWarning)
-
-@app.on_event("startup")
-def load_anti_spoof_model():
-    passive_model()  # Required: missing or changed weights stop this service.
 
 @app.get("/health")
 def health():
@@ -92,8 +87,5 @@ def verify_capture(photo: UploadFile = File(...), known: str = Form(...), thresh
             raise ValueError('Face mismatch')
     except Exception:
         raise HTTPException(422, 'Face not verified. Use one clear face matching your enrolled profile.')
-    try:
-        score = live_score(pixels, boxes[0])
-    except Exception:
-        raise HTTPException(503, 'Anti-spoof verification unavailable. No attendance recorded.')
-    return {'distance': distance, 'live_score': score}
+    baseline = metrics(face_recognition.face_landmarks(pixels, boxes, model='large')[0])
+    return {'distance': distance, 'baseline': baseline}

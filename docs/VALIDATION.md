@@ -1,35 +1,17 @@
-# Validation report — guided camera update
+# Validation report — brief active attendance check
 
-## Passed in this workspace
+## Passed
 
-- Laravel/PHP suite: **42 tests, 265 assertions**, PHP 8.4.12 with in-memory SQLite.
-- Tests cover three enrollment checks, self-enrollment and owner enrollment, old-template upgrade, removal of owner photo enrollment, enrollment required for attendance, incomplete/expired/reused/wrong-user/wrong-purpose proof rejection, frozen frames, nonce reuse, face mismatch, service failure, profile reset, duplicate attendance, overnight checkout and ISO timestamp serialization.
-- Existing leave, approval, roles and login-rate-limit tests still pass.
-- Seven Python motion-rule tests pass: direction requirements, centered/open-eye front views, open/closed/open ordering, rejected static eyes, rejected head-turn-as-blink, final front view and scale-independent eye ratios.
-- Six passive-classifier tests pass for normalization, class order, malformed probabilities and fail-closed model files. The real pinned ONNX model was loaded on CPU and a synthetic-input inference completed; this is a runtime smoke check, not an accuracy measurement.
-- PHP tests reject low/missing/invalid anti-spoof scores, unavailable inference, reused photos and old motion-only proofs.
-- Python face-service syntax compilation and Laravel Pint formatting pass.
-- TypeScript strict compile and Vite production build pass.
-- Four Playwright browser tests pass using a simulated camera and mocked API: three-step self-enrollment with failed-step retry, single-photo check-in/checkout and full date/time rendering; modal layout and camera track cleanup at 320, 390, 768, 1024, 1440 and 1920 px; camera-permission recovery instructions; owner enrollment for a selected user. No JavaScript exceptions were observed in the enrollment/attendance and layout checks.
-- Mobile camera modal screenshot visually reviewed.
-- HTTPS Vite `/api` proxy smoke check passed against a loopback test server. LAN binding could not be exercised in this sandbox; real phone access remains unverified.
+- PHP 8.4.12 / SQLite feature suite: **41 tests, 267 assertions**. Includes enrollment/owner enrollment, access gating, face mismatch, required movement, incomplete and expired proofs, invalid baseline/service response, unavailable verifier, reused photos, old passive-proof rejection, nonce reuse, duplicate attendance and overnight timestamps. Existing application/approval/login tests pass.
+- Regression test uses the reported former classifier score 0.0012 and face distance 0.1903: after a matching capture and successful active head turn, attendance succeeds. A photo match alone or failed movement creates no record.
+- Seven Python motion-rule tests: static/wrong pose rejected, required direction, front/eye geometry rules and scale-independent ratios. No passive-classifier model remains in the runtime.
+- Four Playwright tests use a fake camera/mocked API for mandatory enrollment, automatic post-capture head-turn flow through check-in/out, full timestamp display, responsive layouts from 320 to 1920 px, camera cleanup, denied permission and owner enrollment.
+- TypeScript strict compilation, Vite build, PHP formatting, Python syntax and git whitespace checks pass.
 
-## Not verified here
+## Limits
 
-- Docker image builds and full Compose startup (Docker is unavailable).
-- PostgreSQL-specific migrations, locking under concurrent load, and production SMTP delivery.
-- Real employee images, dlib inference accuracy/latency, physical camera capture, iOS/Android devices, head-pose thresholds across facial geometry or assistive needs.
-- Presentation-attack resistance against print attacks, screen/video replays, virtual cameras or deepfakes. A trained passive RGB anti-spoof model is implemented for attendance, but its rejection rate on your employees/cameras has not been measured and it is not a certified capture/PAD system.
-- Production deployment, load testing and backup restoration.
+- Face model accuracy, the user's actual webcam after this update, real iOS/Android devices and physical print/screen attack rejection are not measured by these tests.
+- Docker builds, complete Compose startup, PostgreSQL concurrency and production mail delivery remain unverified in this workspace.
+- Active landmark checks are not certified PAD. Recordings, multiple pose images, perspective-distorted photographs and virtual cameras may defeat them. An API cannot prove browser-frame physical origin.
 
-The Laravel tests mock the internal face service. Python motion/PAD tests use synthetic inputs, and browser tests use a fake webcam and mocked API. These checks validate the application protocol and UI, not biometric accuracy or real-device compatibility. Test the documented HTTPS setup with your actual phones, lighting and employees before rollout. No real employee biometric data was used or included in either repository.
-
-
-## Webcam false-rejection threshold update
-
-The real-face acceptance threshold default was changed from 0.95 to the upstream demo's reference 0.60. Three added API tests verify that a valid 0.70 score can pass, 0.59 remains rejected, and configuration cannot disable the classifier. This is a code/decision-boundary check, not camera calibration. Private score/threshold/face-distance diagnostics were added without exposing scores or biometric data in API responses. The user's actual live capture has not been tested here; follow the README to collect its score if rejection persists. Reducing the cutoff trades fewer false rejections for potentially more accepted attacks, so test genuine and physical print/screen samples in the deployment environment.
-
-
-## Reference preprocessing alignment
-
-The ONNX/PyTorch preprocessing now uses OpenCV cubic resizing, matching the original model demo instead of Pillow bilinear resizing. A textured-input test verifies RGB order, crop bounds, resize and normalization against the reference tensor. All 13 Python tests and a pinned-model CPU inference smoke check pass. The actual reported webcam capture is not available as a raw model input; this change does not establish that it will be accepted or measure physical attack rejection. Inspect the private score/active-threshold log if rejection remains.
+The former passive RGB model was removed because it blocked a real reported camera input. That blocker is absent from the new path; there is no unconditional attendance bypass. Test the brief motion check with your real employees/cameras before rollout.

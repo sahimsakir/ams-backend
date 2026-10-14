@@ -1,10 +1,10 @@
 # AMS Backend
 
-Laravel 12 / PHP 8.4 API, PostgreSQL 17, queued email and internal Python face verification. Companion React client: `ams-frontend` repository.
+Laravel 12 / PHP 8.4 API, PostgreSQL 17, queued email and an internal Python face service. Companion React/TypeScript frontend: [ams-frontend](https://github.com/sahimsakir/ams-frontend), run separately without Docker.
 
-## Run
+## First run
 
-Requirements: Docker with Compose v2 and Python 3. From this repository root:
+Requirements: Docker with Compose v2 and Python 3. From this backend repository root, where `compose.yaml` lives:
 
 ```sh
 python3 scripts/setup-env.py
@@ -14,99 +14,55 @@ docker compose run --rm api php artisan migrate --seed --force
 docker compose up -d
 ```
 
-Read OWNER_EMAIL and OWNER_PASSWORD from the generated `.env`. Set up people and teams; each user completes guided face enrollment, or an enrolled owner enrolls them from People through the frontend at http://localhost:5173. API: http://localhost:8000; health: /up; local test inbox: http://localhost:8025. `.env` must not be committed. Preserve APP_KEY when migrating an existing database.
-
-Compose lives at the root of this backend repository. Face service is bundled under `face-service/`, so no sibling source folders are needed. PostgreSQL and face service ports are internal. The frontend runs separately with npm.
-
-## Verification
-
-```sh
-docker compose exec api php artisan test
-docker compose logs --tail=100 api worker face
-```
-
-42 automated tests (265 assertions) passed with SQLite; Docker/PostgreSQL runtime and actual face accuracy have not been verified here. See docs/VALIDATION.md. Mailpit captures local email; configure MAIL_HOST/PORT/USERNAME/PASSWORD and FROM settings for delivery and recreate API/worker.
-
-## Policy
-
-All distinct assigned TL/manager/PM reviewers must approve. Team memberships can overlap. No self-approval. Missing team reviewers fall back to other active owners. Pending leave reserves balance. Full-day leave uses a calendar-year allowance, Friday/Saturday weekends and calendar overrides. Cross-year leave must be split. Home office may have no end date and remains revocable; attendance always requires real check-in/out. Overtime requests contain one date and total minutes.
-
-## Deployment limitations
-
-This is a local development setup using Laravel's development server. Production needs HTTPS, a production PHP server, backups and model validation. Attendance uses face matching plus a passive RGB anti-spoof classifier. It rejects suspected spoof captures but cannot guarantee detection of every printed photo, screen replay or virtual camera. Enroll only with employee consent. Templates are encrypted; attendance photos are private. Set your retention policy using `php artisan ams:prune --days=90` inside the API container.
-
-Run `docker compose down` to stop without deleting volumes. Do not use `down -v` unless deleting all stored data intentionally. API details: docs/API.md.
+Use OWNER_EMAIL/OWNER_PASSWORD from the generated `.env`. The API is at http://localhost:8000, health at /up, and the local email inbox at http://localhost:8025. PostgreSQL and face ports are internal. Keep `.env` private and preserve APP_KEY for existing encrypted templates.
 
 ## Update an existing installation
 
-Pull and update both repositories together: the single-photo API has been replaced.
+Update both repositories together, then reload the frontend and open a new camera session. In this backend folder:
 
 ```sh
 git pull --ff-only
 docker compose build api worker face
 docker compose run --rm api php artisan migrate --force
 docker compose up -d --force-recreate api worker face
-```
-
-Keep your existing `.env`, `APP_KEY`, database and volumes. Do not rerun initial environment generation or seed/reset production data for this update. Every role must enroll before accessing the workspace. Owners can also enroll other users from People after completing their own enrollment. Existing profiles need the guided upgrade; they must match the previous template, unless an owner resets it. A verified enrollment cannot be silently overwritten.
-
-Enrollment uses three checks: look forward, look left, and look right. Check-in and checkout each capture one camera photo, which must pass enrolled-face matching and the passive anti-spoof score threshold. No head-turn or eye-closing challenge is required for attendance. Simple visual examples and capture instructions explain each step. Enrollment opens automatically after login and cannot be dismissed; only enrollment and sign-out are available until it passes. The API also blocks other workspace features for unenrolled accounts. Timestamps come from the server and include full dates and seconds in the frontend. Open overnight shifts remain available for checkout.
-
-For mobile access, use the frontend README's trusted HTTPS setup. The API can stay bound to `127.0.0.1:8000`; Vite proxies `/api` to it, including camera bursts. A deployed reverse proxy must allow at least 12 MB request bodies and a 120-second upstream timeout. Only expose the HTTPS frontend/API gateway, never the internal face service.
-
-Schedule `docker compose exec -T api php artisan ams:prune --days=90` hourly (or with your organization's retention schedule). It deletes expired challenge records, temporary captures and their encrypted intermediate templates, plus attendance photos past the chosen retention period. Enrolled templates remain until an owner resets them. Protect backups and preserve the encryption key.
-
-Enrollment uses dlib/face_recognition with geometric head-pose checks. Attendance adds the anti-spoof-mn3 classifier from Open Model Zoo, executed with ONNX Runtime on CPU. Accuracy and accessibility must be evaluated using your employees, cameras, lighting and required threat model. There is no measured accuracy claim or certified PAD model in this release. An account's first enrollment establishes its template; it does not verify a government identity or prevent account sharing. People unable to perform the enrollment head prompts need an agreed supervised process; there is no hidden attendance bypass.
-
-## Single-capture attendance anti-spoof check
-
-Rebuild **face, api and worker**, apply the new capture-hash migration, then recreate the services (use the update commands above). The face image downloads the pinned 12.27 MB `anti-spoof-mn3` ONNX model during its Docker build. The download is size/SHA-384 checked against the official Open Model Zoo manifest; a download failure or mismatched weight stops the build. At service startup, missing/changed model weights stop the face service. The weights are not committed to GitHub. Their upstream license is included in `face-service/ANTI-SPOOF-LICENSE.txt`.
-
-A user starts the camera and selects **Capture & check in/out**. Laravel requires a fresh session, enrolled face match, and model real-face score at or above `FACE_LIVE_MIN_SCORE` (default **0.60**). Missing, invalid or uncertain classification produces no attendance. Configuration below 0.60 is rejected, rather than disabling anti-spoofing. These values are starting settings, not validated operating thresholds for your cameras. Calibrate with both real faces and printed/screen-displayed attacks before use.
-
-An exact previously used attendance image cannot be submitted again, even after its photo is pruned; private SHA-256 capture hashes are retained with timestamps. This is exact-byte replay protection, not a guarantee against a modified image. Session IDs/nonces do not attest that bytes physically originated from a real camera. The browser has no file upload option, but an attacker may call the API directly.
-
-This single-RGB-frame model is **best-effort passive presentation-attack detection**, not certified liveness. Printed photographs, screens and unseen attack types may be misclassified, and real users may be rejected. If guaranteed photo rejection is a business requirement, a normal webcam photo does not meet it; require an independently evaluated capture/PAD system or stronger verification. There is no weaker fallback that skips the classifier.
-
-Model/preprocessing references: [Open Model Zoo model](https://github.com/openvinotoolkit/open_model_zoo/tree/master/models/public/anti-spoof-mn3), [upstream demo](https://github.com/kprokofi/light-weight-face-anti-spoofing). This implementation uses the original model's RGB input, 128×128 face crop and published mean/scale, and treats output class 0 as real.
-
-
-## Genuine webcam capture rejected by the anti-spoof classifier
-
-The initial 0.95 real-face cutoff was too conservative and was not calibrated on employee webcams. The default now follows the upstream demo's spoof threshold of 0.40, equivalent to a minimum real-face score of 0.60 (the two model probabilities sum to one). This is a reference operating point, not an accuracy guarantee or calibration for your cameras. It trades some stricter rejection for fewer false rejections; test both genuine users and physical photo/screen attacks before rollout.
-
-After pulling/rebuilding API and worker, update an explicit old value in your existing `.env`:
-
-```env
-FACE_LIVE_MIN_SCORE=0.60
-```
-
-Recreate API/worker and clear cached configuration:
-
-```sh
-docker compose up -d --force-recreate api worker
 docker compose exec api php artisan optimize:clear
 ```
 
-If a genuine capture is still blocked, inspect `storage/logs/laravel.log` inside the API container for `ams.attendance.face_verification`. It logs the score, threshold, face distance and outcome privately, without photos, embeddings, tokens or nonces. Share only the diagnostic line needed for troubleshooting; do not post biometric images or the full log publicly. Do not keep lowering the threshold to make an arbitrary image pass: investigate crop/preprocessing and test camera-specific attack samples. The classifier remains mandatory, fails closed when unavailable, and configuration below the reference minimum is rejected.
+Keep the existing `.env`, database and volumes. Do not regenerate APP_KEY, reset the database or reseed as part of an update. `docker compose down` stops services without deleting data; do not use `down -v` unless intentionally deleting all stored data.
 
+## Face enrollment and attendance
 
-## Model input resizing correction
+Every role must have a verified face profile before using workspace features. First login automatically opens a mandatory enrollment dialog. Self-enrollment has three clear prompts: look forward, look left, look right. Enrolled owners can enroll other users in person from **People → Enroll face**, after confirming identity and consent. Replacing an existing profile requires an owner reset. Older version-1 templates must upgrade through the guided flow while matching their existing template, or be reset by an owner.
 
-The original ONNX model's PyTorch reference pipeline resizes face crops with OpenCV `INTER_CUBIC`. The first integration used Pillow bilinear resizing, which can alter image texture cues. This has been corrected to cubic resizing with pinned headless OpenCV, keeping RGB normalization, face matching and the anti-spoof threshold intact. A test compares the resulting tensor against the reference preprocessing on non-uniform pixels. This alignment is not proof that an individual camera will pass.
+Attendance now uses **one photo followed by one brief random head turn**:
 
-Pull the backend, rebuild **face**, recreate it, then retry a new capture:
+1. Start the camera, look forward and select **Capture & check in/out**.
+2. After matching the enrolled face, the browser displays **Turn slightly LEFT/RIGHT** and counts down.
+3. Turn about 20–25 degrees in that direction and hold briefly. Four fresh frames are captured automatically. There is no blinking requirement and no extra click on the successful path.
+4. Only after face identity and the requested movement pass does the server record attendance and return its date/time. If the movement did not pass, reposition and select **Retry head-turn check**, or restart the camera.
+
+A photo match alone does not authorize attendance. The session is bound to its user, enrolled template, action, nonce, expiry and single use. The server checks one face per frame, a change in landmark geometry from the initial photo, identity continuity and repeated frame hashes. Exact attendance-photo reuse remains blocked even after old photos are pruned. Photos/templates stay private, and API timestamps use UTC ISO format displayed in Asia/Dhaka. Open overnight shifts remain available for checkout.
+
+The passive RGB classifier was removed from attendance because it falsely rejected the user's real webcam capture with score 0.0012 despite a matching face. `FACE_LIVE_MIN_SCORE` is obsolete and has no effect; an old value can be removed from `.env`. The old passive-only proof is never accepted as a new attendance authorization. No ONNX/OpenCV dependency or anti-spoof weight download is required by this version.
+
+## Practical limits
+
+Active head-pose verification helps reject an unchanged photograph; it is **not certified presentation-attack detection** and cannot guarantee rejection of perspective-distorted photographs, recordings, deepfakes or virtual cameras. API uploads cannot attest the physical source of camera frames. A first enrollment establishes the account's template; it does not independently verify a government identity or prevent account sharing. Physical camera compatibility, pose thresholds, accessibility and attack rejection must be tested with your employees and devices. The real webcam after this update has not been verified in this workspace. There is no photo-only bypass.
+
+For phones/tablets, follow the frontend README's trusted HTTPS setup. Production requires a real PHP server, HTTPS, backups and a same-origin gateway allowing 12 MB request bodies and 120-second upstream timeouts. Never expose the internal face service.
+
+## Policies and operations
+
+All distinct assigned TL/manager/PM reviewers must approve applications. Teams may overlap, self-approval is forbidden, and missing reviewers fall back to other active owners. Pending leave reserves balance. Leave uses calendar-year limits, Friday/Saturday weekends and calendar overrides; split cross-year requests. Home office may be ongoing and revocable. Overtime requests contain a date and total minutes.
+
+Mailpit handles local mail; configure SMTP environment values and recreate API/worker for real delivery. Schedule `docker compose exec -T api php artisan ams:prune --days=90` for your retention policy. It deletes expired challenges, temporary captures and old closed-shift photos, retaining timestamps and capture hashes. Templates remain until reset.
+
+## Validation
 
 ```sh
-git pull --ff-only
-docker compose build face
-docker compose up -d --force-recreate face
+docker compose exec api php artisan test
+docker compose exec face python -m unittest discover -p 'test_*.py'
+docker compose logs --tail=100 api worker face
 ```
 
-If it still rejects a real person, obtain the latest score/threshold diagnostic rather than lowering thresholds blindly:
-
-```sh
-docker compose exec api sh -lc 'grep "ams.attendance.face_verification" storage/logs/laravel.log | tail -n 1'
-```
-
-If `required_live_score` is still `0.95`, follow the threshold-update section above. If the actual live score is below the active reference threshold, the classifier may not generalize to that camera/setup; a screenshot of its preview is not the raw camera input and cannot safely be used to calibrate photo-attack rejection. A different validated PAD/capture method may be necessary. There is no automatic acceptance fallback.
+41 Laravel tests / 267 assertions, seven Python motion tests and four browser tests pass. TypeScript/Vite build passes. Tests mock face inference or use synthetic geometry/fake cameras; they do not establish real-device accuracy. Docker image builds and PostgreSQL concurrency were not verified here. See [docs/VALIDATION.md](docs/VALIDATION.md) and [docs/API.md](docs/API.md).

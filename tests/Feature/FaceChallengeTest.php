@@ -243,37 +243,48 @@ class FaceChallengeTest extends TestCase
         $this->getJson('/api/users')->assertForbidden();
     }
 
-    public function test_spoof_and_uncertain_captures_cannot_record_attendance(): void
+    public function test_photo_match_alone_does_not_allow_attendance(): void
     {
         $this->enroll();
         $c = $this->start('in');
         $this->assertSame('capture', $c['pose']);
-        $this->assertSame(1, $c['total']);
-        $this->serviceBody = ['distance' => 0, 'live_score' => .2];
-        $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $this->frames()[0], 'live_score' => 1], ['Accept' => 'application/json'])->assertUnprocessable();
+        $this->assertSame(2, $c['total']);
+        $next = $this->step($c)->assertOk()->json();
+        $this->assertFalse($next['complete']);
+        $this->assertContains($next['pose'], ['left', 'right']);
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->assertDatabaseCount('attendances', 0);
+        $this->step($next)->assertOk()->assertJsonPath('complete', true);
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
+    }
+
+    public function test_a_failed_head_turn_records_no_attendance(): void
+    {
+        $this->enroll();
+        $c = $this->step($this->start('in'))->assertOk()->json();
+        $this->serviceStatus = 422;
+        $this->step($c)->assertUnprocessable();
         $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
         $this->assertDatabaseCount('attendances', 0);
     }
 
-    public function test_missing_invalid_or_unavailable_anti_spoof_result_fails_closed(): void
+    public function test_missing_baseline_and_unavailable_verifier_fail_closed(): void
     {
         $this->enroll();
         $c = $this->start('in');
-        foreach ([['distance' => 0], ['distance' => 0, 'live_score' => 'NaN'], ['distance' => 0, 'live_score' => 1.5]] as $body) {
-            $this->serviceBody = $body;
-            $this->step($c)->assertStatus(503);
-        }
+        $this->serviceBody = ['distance' => 0];
+        $this->step($c)->assertStatus(503);
         $this->serviceStatus = 503;
         $this->step($c)->assertStatus(503);
         $this->assertDatabaseCount('attendances', 0);
     }
 
-    public function test_attendance_cannot_use_old_step_endpoint_or_unverified_proof(): void
+    public function test_cannot_skip_capture_or_reuse_old_passive_proof(): void
     {
         $this->enroll();
         $c = $this->start('in');
         $this->post('/api/face/challenges/'.$c['id'].'/step', ['nonce' => $c['nonce'], 'frames' => $this->frames()], ['Accept' => 'application/json'])->assertUnprocessable();
-        DB::table('face_challenges')->where('id', $c['id'])->update(['completed_at' => now()]);
+        DB::table('face_challenges')->where('id', $c['id'])->update(['completed_at' => now(), 'capture_hash' => str_repeat('a', 64), 'state' => Crypt::encryptString(json_encode(['passive_verified' => true, 'distance' => 0]))]);
         $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
         $this->assertDatabaseCount('attendances', 0);
     }
@@ -283,38 +294,19 @@ class FaceChallengeTest extends TestCase
         $this->enroll();
         $c = $this->start('in');
         $photo = $this->frames()[0];
-        $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json'])->assertOk();
+        $c = $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json'])->assertOk()->json();
+        $this->step($c)->assertOk();
         $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
         $c = $this->start('out');
         $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json'])->assertUnprocessable();
         $this->assertDatabaseHas('attendances', ['user_id' => $this->user->id, 'check_out' => null]);
     }
 
-    public function test_reference_default_accepts_positive_live_score_below_old_cutoff(): void
+    public function test_low_legacy_classifier_score_does_not_block_valid_active_verification(): void
     {
-        $this->assertSame(.6, config('ams.live_min_score'));
         $this->enroll();
-        $c = $this->start('in');
-        $this->serviceBody = ['distance' => .1, 'live_score' => .70];
-        $this->step($c)->assertOk();
+        $this->serviceBody = ['distance' => .1903, 'live_score' => .0012, 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'embedding' => array_fill(0, 128, 0.0)];
+        $c = $this->complete('in');
         $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
-    }
-
-    public function test_scores_below_reference_threshold_still_rejected(): void
-    {
-        $this->enroll();
-        $c = $this->start('in');
-        $this->serviceBody = ['distance' => .1, 'live_score' => .59];
-        $this->step($c)->assertUnprocessable();
-        $this->assertDatabaseCount('attendances', 0);
-    }
-
-    public function test_anti_spoof_cannot_be_disabled_by_lowering_configuration(): void
-    {
-        $this->enroll();
-        $c = $this->start('in');
-        config(['ams.live_min_score' => .1]);
-        $this->step($c)->assertStatus(503);
-        $this->assertDatabaseCount('attendances', 0);
     }
 }

@@ -190,6 +190,17 @@ class WorkflowTest extends TestCase
             return $res;
         }
         $c = $res->json();
+        $this->travel(2)->seconds();
+        $frames = [];
+        for ($i = 0; $i < 4; $i++) {
+            $f = UploadedFile::fake()->image('frame.jpg');
+            file_put_contents($f->path(), random_bytes(16), FILE_APPEND);
+            $frames[] = $f;
+        }
+        $res = $this->post('/api/face/challenges/'.$c['id'].'/step', ['nonce' => $c['nonce'], 'frames' => $frames], ['Accept' => 'application/json']);
+        if ($res->status() !== 200) {
+            return $res;
+        }
 
         return $this->postJson('/api/attendance', ['action' => $action, 'challenge_id' => $c['id']]);
     }
