@@ -49,7 +49,7 @@ class AccessTest extends TestCase
     public function test_role_grants_direct_grants_and_revocation_apply_to_existing_token(): void
     {
         $view = Permission::where('slug', 'users.view')->first();
-        $calendar = Permission::where('slug', 'calendar.manage')->first();
+        $calendar = Permission::where('slug', 'calendar.create')->first();
         $this->asUser($this->owner);
         $role = $this->postJson('/api/roles', ['name' => 'People Reader', 'slug' => 'people_reader', 'permission_ids' => [$view->id]])->assertCreated()->json('id');
         $this->putJson('/api/users/'.$this->member->id.'/access', ['role_id' => $role, 'permission_ids' => [$calendar->id]])->assertOk();
@@ -84,7 +84,7 @@ class AccessTest extends TestCase
         $this->asUser($this->member)->postJson('/api/roles', [])->assertForbidden();
         $this->getJson('/api/permissions')->assertForbidden();
         $this->putJson('/api/users/'.$this->member->id.'/access', ['role_id' => $this->owner->role_id, 'permission_ids' => []])->assertForbidden();
-        $this->member->directPermissions()->attach(Permission::where('slug', 'users.manage')->value('id'));
+        $this->member->directPermissions()->attach(Permission::where('slug', 'users.update')->value('id'));
         $this->putJson('/api/users/'.$this->member->id, ['name' => 'Escalate', 'email' => $this->member->email, 'role' => 'owner', 'active' => true])->assertForbidden();
         $this->postJson('/api/permissions', [])->assertForbidden();
     }

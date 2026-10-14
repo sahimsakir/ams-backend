@@ -19,6 +19,6 @@ class Permission extends \Spatie\Permission\Models\Permission
 
     protected function casts(): array
     {
-        return ['system' => 'boolean'];
+        return ['system' => 'boolean', 'deprecated' => 'boolean'];
     }
 }

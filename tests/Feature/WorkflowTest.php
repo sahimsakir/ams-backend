@@ -287,13 +287,17 @@ class WorkflowTest extends TestCase
         return DB::table('attendances')->insertGetId(['user_id' => $u->id, 'work_date' => $date, 'check_in' => $in, 'check_out' => $out, 'mode' => $mode, 'in_photo' => 'private.jpg', 'in_distance' => 0.1, 'slot_start' => '09:00', 'slot_end' => '18:00']);
     }
 
-    public function test_only_owner_can_see_other_attendance_and_photos(): void
+    public function test_team_lead_sees_team_attendance_but_not_team_photos_by_default(): void
     {
         $this->travelTo(CarbonImmutable::parse('2026-10-21 12:00', 'Asia/Dhaka'));
         $id = $this->reportRecord($this->employee, '2026-10-18', '2026-10-18 03:00:00', '2026-10-18 12:00:00');
         foreach ([$this->lead, $this->pm] as $u) {
-            $this->asUser($u)->getJson('/api/attendance')->assertJsonCount(0, 'data');
-            $this->getJson('/api/attendance?user_id='.$this->employee->id)->assertForbidden();
+            $this->asUser($u)->getJson('/api/attendance')->assertJsonCount($u->id === $this->lead->id ? 1 : 0, 'data');
+            if ($u->id === $this->lead->id) {
+                $this->getJson('/api/attendance?user_id='.$this->employee->id)->assertOk();
+            } else {
+                $this->getJson('/api/attendance?user_id='.$this->employee->id)->assertForbidden();
+            }
             $this->get('/api/attendance/'.$id.'/photo/in')->assertNotFound();
         }
         $this->asUser($this->owner)->getJson('/api/attendance')->assertJsonCount(1, 'data');
@@ -331,7 +335,9 @@ class WorkflowTest extends TestCase
         $team = DB::table('teams')->first();
         $data = ['team_id' => $team->id, 'start_date' => $today, 'end_date' => $today, 'reason' => 'Office maintenance'];
         $this->asUser($this->employee)->postJson('/api/team-home-office', $data)->assertForbidden();
-        $permission = Permission::where('name', 'home_office.manage')->first();
+        $permission = Permission::where('name', 'home_office.view')->first();
+        $this->lead->givePermissionTo(Permission::where('name', 'home_office.assign')->first());
+        $this->lead->givePermissionTo(Permission::where('name', 'home_office.cancel')->first());
         $this->lead->givePermissionTo($permission);
         $id = $this->asUser($this->lead)->postJson('/api/team-home-office', $data)->assertCreated()->json('id');
         $this->getJson('/api/team-home-office')->assertOk()->assertJsonPath('data.0.team_id', $team->id);

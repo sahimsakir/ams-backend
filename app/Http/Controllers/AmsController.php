@@ -9,6 +9,7 @@ use App\Services\AttendanceReport;
 use App\Services\BrowserAuth;
 use App\Services\FaceProof;
 use App\Services\TableFilters;
+use App\Services\Visibility;
 use App\Services\Workflow as W;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
@@ -22,7 +23,7 @@ class AmsController extends Controller
 {
     private function visible(Request $r): array
     {
-        return $r->user()->isOwner() ? DB::table('users')->pluck('id')->all() : [$r->user()->id];
+        return Visibility::users($r->user(), 'attendance');
     }
 
     public function login(Request $r)
@@ -65,6 +66,33 @@ class AmsController extends Controller
         return DB::table('leave_types')->whereNull('deleted_at')->orderBy('name')->get();
     }
 
+    public function attendancePeople(Request $r)
+    {
+        return DB::table('users')->whereIn('id', $this->visible($r))->orderBy('name')->get(['id', 'name']);
+    }
+
+    public function profile(Request $r, ?int $id = null)
+    {
+        $id = $id ?? $r->user()->id;
+        if ($id === $r->user()->id) {
+            abort_unless($r->user()->hasPermission('profile.view_self'), 403);
+        } else {
+            abort_unless(($r->user()->hasPermission('profile.view_team') || $r->user()->hasPermission('profile.view_all')) && in_array($id, Visibility::users($r->user(), 'profile'), true), 403);
+        }
+        $u = User::findOrFail($id);
+
+        return ['user' => $u->only(['id', 'name', 'email', 'designation', 'phone', 'role_name', 'active', 'slot_start', 'slot_end'])];
+    }
+
+    public function saveProfile(Request $r)
+    {
+        $d = $r->validate(['name' => 'required|string|max:150', 'phone' => 'nullable|string|max:50']);
+        $r->user()->update($d);
+        W::audit($r->user()->id, 'profile.updated', (string) $r->user()->id);
+
+        return ['message' => 'Profile updated'];
+    }
+
     public function dashboard(Request $r)
     {
         $uid = $r->user()->id;
@@ -85,12 +113,14 @@ class AmsController extends Controller
     {
         $uid = $r->user()->id;
         $q = DB::table('applications')->join('users', 'users.id', '=', 'applications.user_id')->leftJoin('leave_types', 'leave_types.id', '=', 'applications.leave_type_id')->select('applications.*', 'users.name as applicant', 'leave_types.name as leave_name');
-        if (! $r->user()->hasPermission('applications.manage')) {
-            $q->where(fn ($q) => $q->where('applications.user_id', $uid)->orWhereIn('applications.id', DB::table('approvals')->where('reviewer_id', $uid)->select('application_id')));
+        if (! $r->user()->hasPermission('applications.view_all')) {
+            $visible = Visibility::users($r->user(), 'applications');
+            $q->where(fn ($q) => $q->whereIn('applications.user_id', $visible)->orWhereIn('applications.id', DB::table('approvals')->where('reviewer_id', $uid)->select('application_id')));
         }$items = $q->orderByDesc('applications.id')->paginate(50);
         $ids = collect($items->items())->pluck('id');
         $approvals = DB::table('approvals')->join('users', 'users.id', '=', 'approvals.reviewer_id')->whereIn('application_id', $ids)->select('approvals.*', 'users.name')->get()->groupBy('application_id');
         foreach ($items as $item) {
+            $item->can_cancel = (int) $item->user_id === $uid ? $r->user()->hasPermission('applications.cancel_self') : ($r->user()->hasPermission('applications.cancel_any') || ($r->user()->hasPermission('applications.cancel_team') && in_array((int) $item->user_id, Visibility::teamUsers($r->user()), true)));
             $item->has_document = (bool) $item->document;
             unset($item->document);
             $item->approvals = $approvals->get($item->id, collect());
@@ -101,6 +131,7 @@ class AmsController extends Controller
 
     public function apply(Request $r)
     {
+        abort_unless($r->user()->hasPermission('applications.create_'.(string) $r->input('kind')), 403);
         $d = $r->validate(['kind' => 'required|in:leave,home_office,overtime', 'leave_type_id' => ['nullable', Rule::exists('leave_types', 'id')->whereNull('deleted_at')], 'start_date' => 'required|date_format:Y-m-d', 'end_date' => 'nullable|date_format:Y-m-d|after_or_equal:start_date', 'reason' => 'required|string|min:5|max:4000', 'document' => 'required_if:kind,overtime|nullable|file|mimes:jpg,jpeg,png,pdf|max:15360', 'contact' => 'nullable|string|max:100', 'covering' => 'nullable|string|max:100', 'minutes' => 'nullable|integer|min:1|max:1440']);
         $uid = $r->user()->id;
         $end = $d['end_date'] ?? null;
@@ -163,6 +194,7 @@ class AmsController extends Controller
 
     public function decision(Request $r, int $id)
     {
+        abort_unless($r->user()->hasPermission($r->input('decision') === 'approved' ? 'applications.approve' : 'applications.reject'), 403);
         $d = $r->validate(['decision' => 'required|in:approved,rejected', 'comment' => 'required_if:decision,rejected|nullable|string|max:2000']);
         DB::transaction(function () use ($r, $id, $d) {
             $a = DB::table('applications')->where('id', $id)->lockForUpdate()->first();
@@ -186,7 +218,8 @@ class AmsController extends Controller
         DB::transaction(function () use ($r, $id) {
             $a = DB::table('applications')->where('id', $id)->lockForUpdate()->first();
             abort_unless($a, 404);
-            abort_unless($a->user_id === $r->user()->id || $r->user()->hasPermission('applications.manage'), 403);
+            $canCancel = $a->user_id === $r->user()->id ? $r->user()->hasPermission('applications.cancel_self') : ($r->user()->hasPermission('applications.cancel_any') || ($r->user()->hasPermission('applications.cancel_team') && in_array((int) $a->user_id, Visibility::teamUsers($r->user()), true)));
+            abort_unless($canCancel, 403);
             abort_unless($a->status === 'pending' || ($a->kind === 'home_office' && $a->status === 'approved'), 409, 'Only pending requests or active home-office arrangements can be cancelled');
             DB::table('applications')->where('id', $id)->update(['status' => 'cancelled', 'updated_at' => now()]);
             W::audit($r->user()->id, 'application.cancelled', (string) $id);
@@ -200,7 +233,7 @@ class AmsController extends Controller
 
     public function deleteFace(Request $r, int $id)
     {
-        abort_unless($r->user()->hasPermission('face.manage'), 403);
+        abort_unless($r->user()->hasPermission('face.reset'), 403);
         DB::transaction(function () use ($id) {
             DB::table('users')->where('id', $id)->lockForUpdate()->first();
             DB::table('face_profiles')->where('user_id', $id)->delete();
@@ -213,6 +246,7 @@ class AmsController extends Controller
 
     public function punch(Request $r)
     {
+        abort_unless($r->user()->hasPermission($r->input('action') === 'in' ? 'attendance.check_in' : 'attendance.check_out'), 403);
         $d = $r->validate(['action' => 'required|in:in,out', 'challenge_id' => 'required|uuid']);
         $uid = $r->user()->id;
 
@@ -265,7 +299,7 @@ class AmsController extends Controller
         $start = $d['start_date'] ?? now('Asia/Dhaka')->startOfMonth()->toDateString();
         $end = $d['end_date'] ?? now('Asia/Dhaka')->toDateString();
         abort_if($end < $start || CarbonImmutable::parse($start)->diffInDays(CarbonImmutable::parse($end)) > 366, 422, 'Select a date range up to one year.');
-        abort_if(! $r->user()->isOwner() && isset($d['user_id']) && (int) $d['user_id'] !== $r->user()->id, 403);
+        abort_if(isset($d['user_id']) && ! in_array((int) $d['user_id'], $this->visible($r), true), 403);
         $uids = isset($d['user_id']) ? [(int) $d['user_id']] : $this->visible($r);
         $report = AttendanceReport::build($uids, $start, $end);
         [$report['data'],$facets] = TableFilters::array($r, $report['data'], ['name', 'work_date', 'check_in', 'check_out', 'mode', 'leave_name', 'status', 'slot_start', 'slot_end', 'working_minutes', 'actual_minutes']);
@@ -279,7 +313,7 @@ class AmsController extends Controller
 
     public function saveSlot(Request $r, string $kind, int $id)
     {
-        abort_unless($r->user()->hasPermission('work_slots.manage'), 403);
+        abort_unless($r->user()->hasPermission($kind === 'users' ? 'work_slots.update_user' : 'work_slots.update_team'), 403);
         abort_unless(in_array($kind, ['users', 'teams']), 404);
         abort_unless(DB::table($kind)->where('id', $id)->exists(), 404);
         $d = $r->validate(['slot_start' => 'nullable|date_format:H:i', 'slot_end' => 'nullable|date_format:H:i', 'slot_team_id' => 'nullable|integer|exists:teams,id']);
@@ -299,7 +333,13 @@ class AmsController extends Controller
     {
         abort_unless(in_array($side, ['in', 'out']), 404);
         $a = DB::table('attendances')->where('id', $id)->first();
-        abort_unless($a && in_array($a->user_id, $this->visible($r)), 404);
+        $uids = [$r->user()->id];
+        if ($r->user()->hasPermission('attendance.photo_view_all')) {
+            $uids = DB::table('users')->pluck('id')->all();
+        } elseif ($r->user()->hasPermission('attendance.photo_view_team')) {
+            $uids = DB::table('team_user')->whereIn('team_id', DB::table('team_user')->where('user_id', $r->user()->id)->select('team_id'))->pluck('user_id')->push($r->user()->id)->all();
+        }
+        abort_unless($a && in_array($a->user_id, $uids), 404);
         $path = $a->{$side.'_photo'};
         abort_unless($path && Storage::disk('local')->exists($path), 404);
 
@@ -310,7 +350,8 @@ class AmsController extends Controller
     {
         abort_unless($r->user()->hasPermission('users.view'), 403);
 
-        return User::with(['assignedRole.permissions', 'directPermissions'])->orderBy('name')->get()->map(function ($u) {
+        return User::with(['assignedRole.permissions', 'directPermissions'])->orderBy('name')->get()->map(function ($u) use ($r) {
+            $u->can_view_profile = $u->id === $r->user()->id ? $r->user()->hasPermission('profile.view_self') : ($r->user()->hasPermission('profile.view_all') || ($r->user()->hasPermission('profile.view_team') && in_array((int) $u->id, Visibility::teamUsers($r->user()), true)));
             $u->direct_permission_ids = $u->directPermissions->pluck('id');
             $u->face_enrolled = DB::table('face_profiles')->where('user_id', $u->id)->where('verification_version', '>=', 2)->exists();
             $u->face_reset_available = DB::table('face_profiles')->where('user_id', $u->id)->exists();
@@ -321,7 +362,7 @@ class AmsController extends Controller
 
     public function saveUser(Request $r, ?int $id = null)
     {
-        abort_unless($r->user()->hasPermission('users.manage'), 403);
+        abort_unless($r->user()->hasPermission($id ? 'users.update' : 'users.create'), 403);
         $d = $r->validate(['name' => 'required|string|max:150', 'email' => ['required', 'email', Rule::unique('users')->ignore($id)], 'role' => ['required', Rule::exists('roles', 'slug')], 'password' => ($id ? 'nullable' : 'required').'|string|min:12', 'active' => 'required|boolean', 'designation' => 'nullable|string|max:150', 'phone' => 'nullable|string|max:50']);
         $targetRole = Role::where('slug', $d['role'])->firstOrFail();
         $existing = $id ? User::findOrFail($id) : null;
@@ -344,7 +385,7 @@ class AmsController extends Controller
     public function teams(Request $r)
     {
         $q = DB::table('teams');
-        if (! $r->user()->isOwner() && ! $r->user()->hasPermission('teams.manage')) {
+        if (! $r->user()->isOwner() && ! $r->user()->hasPermission('teams.members_update')) {
             $q->whereIn('id', DB::table('team_user')->where('user_id', $r->user()->id)->select('team_id'));
         }
 
@@ -357,7 +398,7 @@ class AmsController extends Controller
 
     public function saveTeam(Request $r)
     {
-        abort_unless($r->user()->hasPermission('teams.manage'), 403);
+        abort_unless($r->user()->hasPermission('teams.create'), 403);
         $d = $r->validate(['name' => 'required|string|max:100|unique:teams']);
         $id = DB::table('teams')->insertGetId([...$d, 'created_at' => now(), 'updated_at' => now()]);
 
@@ -366,7 +407,7 @@ class AmsController extends Controller
 
     public function members(Request $r, int $id)
     {
-        abort_unless($r->user()->hasPermission('teams.manage'), 403);
+        abort_unless($r->user()->hasPermission('teams.members_update'), 403);
         abort_unless(DB::table('teams')->where('id', $id)->exists(), 404);
         $d = $r->validate(['members' => 'present|array', 'members.*.user_id' => 'required|distinct|exists:users,id', 'members.*.team_role' => ['required', Rule::exists('roles', 'slug')]]);
         DB::transaction(function () use ($d, $id, $r) {
@@ -381,7 +422,7 @@ class AmsController extends Controller
 
     public function saveLeaveType(Request $r, ?int $id = null)
     {
-        abort_unless($r->user()->hasPermission('leave_types.manage'), 403);
+        abort_unless($r->user()->hasPermission($id ? 'leave_types.update' : 'leave_types.create'), 403);
         $d = $r->validate(['name' => ['required', 'string', 'max:100', Rule::unique('leave_types')->ignore($id)], 'annual_limit' => 'required|integer|min:0|max:366']);
         if ($id) {
             abort_unless(DB::table('leave_types')->where('id', $id)->whereNull('deleted_at')->exists(), 404);
@@ -396,7 +437,7 @@ class AmsController extends Controller
 
     public function deleteLeaveType(Request $r, int $id)
     {
-        abort_unless($r->user()->hasPermission('leave_types.manage'), 403);
+        abort_unless($r->user()->hasPermission('leave_types.delete'), 403);
         abort_unless(DB::table('leave_types')->where('id', $id)->whereNull('deleted_at')->exists(), 404);
         DB::table('leave_types')->where('id', $id)->update(['deleted_at' => now(), 'updated_at' => now()]);
         W::audit($r->user()->id, 'leave_type.deleted', (string) $id);
@@ -406,7 +447,7 @@ class AmsController extends Controller
 
     public function deleteUser(Request $r, int $id)
     {
-        abort_unless($r->user()->hasPermission('users.manage'), 403);
+        abort_unless($r->user()->hasPermission('users.delete'), 403);
         abort_if($id === $r->user()->id, 422, 'You cannot delete your own account.');
         DB::transaction(function () use ($r, $id) {
             $u = User::lockForUpdate()->findOrFail($id);
@@ -471,7 +512,7 @@ class AmsController extends Controller
     public function document(Request $r, int $id)
     {
         $a = DB::table('applications')->where('id', $id)->first();
-        abort_unless($a && ($r->user()->hasPermission('applications.manage') || $a->user_id === $r->user()->id || DB::table('approvals')->where('application_id', $id)->where('reviewer_id', $r->user()->id)->exists()), 404);
+        abort_unless($a && Visibility::application($r->user(), $a), 404);
         abort_unless($a->document && Storage::disk('local')->exists($a->document), 404);
 
         return Storage::disk('local')->download($a->document, $a->document_name, ['Cache-Control' => 'private, no-store', 'X-Content-Type-Options' => 'nosniff']);
@@ -484,7 +525,7 @@ class AmsController extends Controller
 
     public function saveCalendar(Request $r)
     {
-        abort_unless($r->user()->hasPermission('calendar.manage'), 403);
+        abort_unless($r->user()->hasPermission(DB::table('calendar_days')->where('date', $r->input('date'))->exists() ? 'calendar.update' : 'calendar.create'), 403);
         $d = $r->validate(['date' => 'required|date_format:Y-m-d', 'name' => 'required|string|max:150', 'is_working' => 'required|boolean']);
         DB::table('calendar_days')->updateOrInsert(['date' => $d['date']], $d);
 
@@ -493,7 +534,7 @@ class AmsController extends Controller
 
     public function deleteCalendar(Request $r, int $id)
     {
-        abort_unless($r->user()->hasPermission('calendar.manage'), 403);
+        abort_unless($r->user()->hasPermission('calendar.delete'), 403);
         DB::table('calendar_days')->where('id', $id)->delete();
 
         return ['message' => 'Calendar override removed'];

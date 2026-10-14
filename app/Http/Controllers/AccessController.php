@@ -12,21 +12,26 @@ use Illuminate\Validation\Rule;
 
 class AccessController extends Controller
 {
-    private function owner(Request $r): void
+    private function grantable(Request $r, array $ids): void
     {
-        abort_unless($r->user()->isOwner(), 403, 'Only Owner can manage access.');
+        if ($r->user()->isOwner()) {
+            return;
+        }
+        foreach (Permission::whereIn('id', $ids)->where('deprecated', false)->pluck('name') as $key) {
+            abort_unless($r->user()->hasPermission($key), 403, 'You cannot grant permissions you do not hold.');
+        }
     }
 
     public function index(Request $r)
     {
-        abort_unless($r->user()->isOwner() || $r->user()->hasPermission('teams.manage') || $r->user()->hasPermission('users.manage'), 403);
+        abort_unless(collect(['roles.view', 'roles.create', 'roles.update', 'teams.members_update', 'users.create', 'users.update', 'users.assign_access'])->contains(fn ($p) => $r->user()->hasPermission($p)), 403);
 
         return Role::with('permissions')->orderBy('id')->get();
     }
 
     public function permissions(Request $r)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('permissions.view') || $r->user()->hasPermission('roles.create') || $r->user()->hasPermission('roles.update') || $r->user()->hasPermission('users.assign_access'), 403);
 
         return Permission::orderBy('slug')->get();
     }
@@ -43,11 +48,16 @@ class AccessController extends Controller
 
     private function saveRole(Request $r, ?int $id = null)
     {
-        $this->owner($r);
-        $d = $r->validate(['name' => ['required', 'string', 'max:100', Rule::unique('roles', 'display_name')->ignore($id)], 'slug' => ['required', 'regex:/^[a-z][a-z0-9_]*$/', 'max:100', Rule::unique('roles', 'slug')->ignore($id)], 'permission_ids' => 'present|array', 'permission_ids.*' => 'integer|distinct|exists:permissions,id']);
+        abort_unless($r->user()->hasPermission($id ? 'roles.update' : 'roles.create'), 403);
+        $d = $r->validate(['name' => ['required', 'string', 'max:100', Rule::unique('roles', 'display_name')->ignore($id)], 'slug' => ['required', 'regex:/^[a-z][a-z0-9_]*$/', 'max:100', Rule::unique('roles', 'slug')->ignore($id)], 'permission_ids' => 'present|array', 'permission_ids.*' => ['integer', 'distinct', Rule::exists('permissions', 'id')->where(fn ($q) => $q->where('deprecated', false))]]);
+
+        $this->grantable($r, $d['permission_ids']);
 
         return DB::transaction(function () use ($r, $id, $d) {
             $role = $id ? Role::lockForUpdate()->findOrFail($id) : new Role;
+            if ($role->exists) {
+                $this->grantable($r, $role->permissions->pluck('id')->all());
+            }
             if ($role->exists && $role->slug === 'owner') {
                 abort(422, 'Owner is protected and always has all permissions.');
             }
@@ -66,9 +76,10 @@ class AccessController extends Controller
 
     public function destroy(Request $r, int $id)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('roles.delete'), 403);
         DB::transaction(function () use ($r, $id) {
             $role = Role::lockForUpdate()->findOrFail($id);
+            $this->grantable($r, $role->permissions->pluck('id')->all());
             abort_if($role->system, 422, 'Initial roles cannot be deleted.');
             abort_if(DB::table('users')->where('role_id', $id)->exists() || DB::table('team_user')->where('team_role_id', $id)->exists(), 422, 'Reassign users and team memberships before deleting this role.');
             $role->delete();
@@ -80,7 +91,7 @@ class AccessController extends Controller
 
     public function savePermission(Request $r, ?int $id = null)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission($id ? 'permissions.update' : 'permissions.create'), 403);
         $d = $r->validate(['name' => 'required|string|max:150', 'slug' => ['required', 'regex:/^[a-z][a-z0-9_.]*$/', 'max:150', Rule::unique('permissions')->ignore($id)]]);
 
         return DB::transaction(function () use ($r, $id, $d) {
@@ -95,7 +106,7 @@ class AccessController extends Controller
 
     public function deletePermission(Request $r, int $id)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('permissions.delete'), 403);
         DB::transaction(function () use ($r, $id) {
             $p = Permission::lockForUpdate()->findOrFail($id);
             abort_if($p->system, 422, 'Built-in feature permissions cannot be deleted.');
@@ -108,12 +119,15 @@ class AccessController extends Controller
 
     public function assign(Request $r, int $id)
     {
-        $this->owner($r);
-        $d = $r->validate(['role_id' => 'required|integer|exists:roles,id', 'permission_ids' => 'present|array', 'permission_ids.*' => 'integer|distinct|exists:permissions,id']);
+        abort_unless($r->user()->hasPermission('users.assign_access'), 403);
+        $d = $r->validate(['role_id' => 'required|integer|exists:roles,id', 'permission_ids' => 'present|array', 'permission_ids.*' => ['integer', 'distinct', Rule::exists('permissions', 'id')->where(fn ($q) => $q->where('deprecated', false))]]);
 
         return DB::transaction(function () use ($r, $id, $d) {
             $role = Role::lockForUpdate()->findOrFail($d['role_id']);
             $u = User::lockForUpdate()->findOrFail($id);
+            abort_if(! $r->user()->isOwner() && ($role->slug === 'owner' || $u->isOwner()), 403);
+            $this->grantable($r, $role->permissions->pluck('id')->all());
+            $this->grantable($r, $d['permission_ids']);
             abort_if($id === $r->user()->id && $role->slug !== 'owner', 422, 'You cannot remove your own Owner role.');
             $u->update(['role_id' => $role->id]);
             $u->syncPermissions(Permission::whereIn('id', $d['permission_ids'])->get());

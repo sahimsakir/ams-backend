@@ -32,7 +32,7 @@ class Workflow
     {
         $teams = DB::table('team_user')->where('user_id', $uid)->pluck('team_id');
         $members = DB::table('team_user')->whereIn('team_id', $teams)->get();
-        $eligible = User::with(['assignedRole.permissions', 'directPermissions'])->where('active', true)->where('id', '!=', $uid)->whereIn('id', $members->pluck('user_id'))->get()->filter(fn ($u) => $u->hasPermission('applications.review'))->pluck('id')->all();
+        $eligible = User::with(['assignedRole.permissions', 'directPermissions'])->where('active', true)->where('id', '!=', $uid)->whereIn('id', $members->pluck('user_id'))->get()->filter(fn ($u) => ($u->hasPermission('applications.approve') || $u->hasPermission('applications.reject')))->pluck('id')->all();
         $owners = User::whereHas('assignedRole', fn ($q) => $q->where('slug', 'owner'))->where('active', true)->where('id', '!=', $uid)->pluck('id')->all();
         $ids = [];
         foreach ($teams as $team) {
