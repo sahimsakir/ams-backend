@@ -26,8 +26,11 @@ class FaceController extends Controller
 
         return DB::transaction(function () use ($r, $d) {
             $uid = $r->user()->id;
+            if (in_array($d['purpose'], ['in', 'out'])) {
+                abort_unless($r->user()->hasPermission('attendance.record'), 403);
+            }
             $subject = (int) ($d['user_id'] ?? $uid);
-            abort_if($subject !== $uid && ($d['purpose'] !== 'enroll' || $r->user()->role !== 'owner'), 403, 'Only owners can enroll other users.');
+            abort_if($subject !== $uid && ($d['purpose'] !== 'enroll' || ! $r->user()->hasPermission('face.manage')), 403, 'Face management permission is required to enroll other users.');
             FaceProof::lockUsers($uid, $subject);
             abort_unless(DB::table('users')->where('id', $subject)->where('active', true)->exists(), 422, 'This account is inactive.');
             abort_if($subject !== $uid && ! DB::table('face_profiles')->where('user_id', $uid)->where('verification_version', '>=', 2)->exists(), 403, 'Enroll your own face first.');
@@ -61,7 +64,7 @@ class FaceController extends Controller
             $candidate = DB::table('face_challenges')->where('id', $id)->where('user_id', $uid)->first();
             abort_unless($candidate, 404);
             $subject = (int) ($candidate->subject_id ?? $uid);
-            abort_if($subject !== $uid && $r->user()->role !== 'owner', 403);
+            abort_if($subject !== $uid && ! $r->user()->hasPermission('face.manage'), 403);
             FaceProof::lockUsers($uid, $subject);
             $c = DB::table('face_challenges')->where('id', $id)->where('user_id', $uid)->lockForUpdate()->first();
             abort_unless($c, 404);
@@ -111,6 +114,7 @@ class FaceController extends Controller
 
     public function capture(Request $r, string $id)
     {
+        abort_unless($r->user()->hasPermission('attendance.record'), 403);
         $d = $r->validate(['nonce' => 'required|string', 'photo' => 'required|file|mimes:jpeg|max:1024']);
 
         return DB::transaction(function () use ($r, $id, $d) {
@@ -155,7 +159,7 @@ class FaceController extends Controller
             $candidate = DB::table('face_challenges')->where('id', $d['challenge_id'])->where('user_id', $uid)->first();
             abort_unless($candidate, 422, 'Invalid camera verification.');
             $subject = (int) ($candidate->subject_id ?? $uid);
-            abort_if($subject !== $uid && $r->user()->role !== 'owner', 403);
+            abort_if($subject !== $uid && ! $r->user()->hasPermission('face.manage'), 403);
             FaceProof::lockUsers($uid, $subject);
             $c = FaceProof::consume($uid, $d['challenge_id'], 'enroll');
             abort_if(DB::table('face_profiles')->where('user_id', $subject)->where('verification_version', '>=', 2)->exists(), 409, 'Already enrolled.');

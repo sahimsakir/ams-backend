@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Role;
 use App\Models\User;
 use App\Notifications\ApplicationNotice;
 use App\Services\AttendanceReport;
@@ -17,14 +18,9 @@ use Illuminate\Validation\Rule;
 
 class AmsController extends Controller
 {
-    private function owner(Request $r): void
-    {
-        abort_unless($r->user()->role === 'owner', 403);
-    }
-
     private function visible(Request $r): array
     {
-        return $r->user()->role === 'owner' ? DB::table('users')->pluck('id')->all() : [$r->user()->id];
+        return $r->user()->isOwner() ? DB::table('users')->pluck('id')->all() : [$r->user()->id];
     }
 
     public function login(Request $r)
@@ -85,7 +81,7 @@ class AmsController extends Controller
     {
         $uid = $r->user()->id;
         $q = DB::table('applications')->join('users', 'users.id', '=', 'applications.user_id')->leftJoin('leave_types', 'leave_types.id', '=', 'applications.leave_type_id')->select('applications.*', 'users.name as applicant', 'leave_types.name as leave_name');
-        if ($r->user()->role !== 'owner') {
+        if (! $r->user()->hasPermission('applications.manage')) {
             $q->where(fn ($q) => $q->where('applications.user_id', $uid)->orWhereIn('applications.id', DB::table('approvals')->where('reviewer_id', $uid)->select('application_id')));
         }$items = $q->orderByDesc('applications.id')->paginate(50);
         $ids = collect($items->items())->pluck('id');
@@ -186,7 +182,7 @@ class AmsController extends Controller
         DB::transaction(function () use ($r, $id) {
             $a = DB::table('applications')->where('id', $id)->lockForUpdate()->first();
             abort_unless($a, 404);
-            abort_unless($a->user_id === $r->user()->id || $r->user()->role === 'owner', 403);
+            abort_unless($a->user_id === $r->user()->id || $r->user()->hasPermission('applications.manage'), 403);
             abort_unless($a->status === 'pending' || ($a->kind === 'home_office' && $a->status === 'approved'), 409, 'Only pending requests or active home-office arrangements can be cancelled');
             DB::table('applications')->where('id', $id)->update(['status' => 'cancelled', 'updated_at' => now()]);
             W::audit($r->user()->id, 'application.cancelled', (string) $id);
@@ -200,7 +196,7 @@ class AmsController extends Controller
 
     public function deleteFace(Request $r, int $id)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('face.manage'), 403);
         DB::transaction(function () use ($id) {
             DB::table('users')->where('id', $id)->lockForUpdate()->first();
             DB::table('face_profiles')->where('user_id', $id)->delete();
@@ -262,7 +258,7 @@ class AmsController extends Controller
         $start = $d['start_date'] ?? now('Asia/Dhaka')->startOfMonth()->toDateString();
         $end = $d['end_date'] ?? now('Asia/Dhaka')->toDateString();
         abort_if($end < $start || CarbonImmutable::parse($start)->diffInDays(CarbonImmutable::parse($end)) > 366, 422, 'Select a date range up to one year.');
-        abort_if($r->user()->role !== 'owner' && isset($d['user_id']) && (int) $d['user_id'] !== $r->user()->id, 403);
+        abort_if(! $r->user()->isOwner() && isset($d['user_id']) && (int) $d['user_id'] !== $r->user()->id, 403);
         $uids = isset($d['user_id']) ? [(int) $d['user_id']] : $this->visible($r);
         $report = AttendanceReport::build($uids, $start, $end);
         $page = max(1, (int) $r->query('page', 1));
@@ -274,7 +270,7 @@ class AmsController extends Controller
 
     public function saveSlot(Request $r, string $kind, int $id)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('work_slots.manage'), 403);
         abort_unless(in_array($kind, ['users', 'teams']), 404);
         abort_unless(DB::table($kind)->where('id', $id)->exists(), 404);
         $d = $r->validate(['slot_start' => 'nullable|date_format:H:i', 'slot_end' => 'nullable|date_format:H:i', 'slot_team_id' => 'nullable|integer|exists:teams,id']);
@@ -303,9 +299,10 @@ class AmsController extends Controller
 
     public function users(Request $r)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('users.view'), 403);
 
-        return User::orderBy('name')->get()->map(function ($u) {
+        return User::with(['assignedRole.permissions', 'directPermissions'])->orderBy('name')->get()->map(function ($u) {
+            $u->direct_permission_ids = $u->directPermissions->pluck('id');
             $u->face_enrolled = DB::table('face_profiles')->where('user_id', $u->id)->where('verification_version', '>=', 2)->exists();
             $u->face_reset_available = DB::table('face_profiles')->where('user_id', $u->id)->exists();
 
@@ -315,8 +312,12 @@ class AmsController extends Controller
 
     public function saveUser(Request $r, ?int $id = null)
     {
-        $this->owner($r);
-        $d = $r->validate(['name' => 'required|string|max:150', 'email' => ['required', 'email', Rule::unique('users')->ignore($id)], 'role' => 'required|in:owner,manager,pm,team_lead,employee', 'password' => ($id ? 'nullable' : 'required').'|string|min:12', 'active' => 'required|boolean', 'designation' => 'nullable|string|max:150', 'phone' => 'nullable|string|max:50']);
+        abort_unless($r->user()->hasPermission('users.manage'), 403);
+        $d = $r->validate(['name' => 'required|string|max:150', 'email' => ['required', 'email', Rule::unique('users')->ignore($id)], 'role' => ['required', Rule::exists('roles', 'slug')], 'password' => ($id ? 'nullable' : 'required').'|string|min:12', 'active' => 'required|boolean', 'designation' => 'nullable|string|max:150', 'phone' => 'nullable|string|max:50']);
+        $targetRole = Role::where('slug', $d['role'])->firstOrFail();
+        $existing = $id ? User::findOrFail($id) : null;
+        abort_if(! $r->user()->isOwner() && ((! $existing && $targetRole->slug !== 'employee') || ($existing && $existing->role_id !== $targetRole->id) || ($existing && $existing->isOwner())), 403, 'Only Owner can change role assignments or manage an Owner.');
+        $d['role_id'] = $targetRole->id;
         if ($id === $r->user()->id && (! $d['active'] || $d['role'] !== 'owner')) {
             W::fail('You cannot deactivate or demote your own owner account.');
         }if (empty($d['password'])) {
@@ -331,7 +332,7 @@ class AmsController extends Controller
     public function teams(Request $r)
     {
         $q = DB::table('teams');
-        if ($r->user()->role !== 'owner') {
+        if (! $r->user()->isOwner() && ! $r->user()->hasPermission('teams.manage')) {
             $q->whereIn('id', DB::table('team_user')->where('user_id', $r->user()->id)->select('team_id'));
         }
 
@@ -344,7 +345,7 @@ class AmsController extends Controller
 
     public function saveTeam(Request $r)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('teams.manage'), 403);
         $d = $r->validate(['name' => 'required|string|max:100|unique:teams']);
         $id = DB::table('teams')->insertGetId([...$d, 'created_at' => now(), 'updated_at' => now()]);
 
@@ -353,13 +354,13 @@ class AmsController extends Controller
 
     public function members(Request $r, int $id)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('teams.manage'), 403);
         abort_unless(DB::table('teams')->where('id', $id)->exists(), 404);
-        $d = $r->validate(['members' => 'present|array', 'members.*.user_id' => 'required|distinct|exists:users,id', 'members.*.team_role' => 'required|in:employee,team_lead,manager,pm']);
+        $d = $r->validate(['members' => 'present|array', 'members.*.user_id' => 'required|distinct|exists:users,id', 'members.*.team_role' => ['required', Rule::exists('roles', 'slug')]]);
         DB::transaction(function () use ($d, $id, $r) {
             DB::table('team_user')->where('team_id', $id)->delete();
             foreach ($d['members'] as $m) {
-                DB::table('team_user')->insert([...$m, 'team_id' => $id]);
+                DB::table('team_user')->insert([...$m, 'team_id' => $id, 'team_role_id' => Role::where('slug', $m['team_role'])->value('id')]);
             }W::audit($r->user()->id, 'team.members.updated', (string) $id);
         });
 
@@ -368,7 +369,7 @@ class AmsController extends Controller
 
     public function saveLeaveType(Request $r, ?int $id = null)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('leave_types.manage'), 403);
         $d = $r->validate(['name' => ['required', 'string', 'max:100', Rule::unique('leave_types')->ignore($id)], 'annual_limit' => 'required|integer|min:0|max:366']);
         if ($id) {
             abort_unless(DB::table('leave_types')->where('id', $id)->whereNull('deleted_at')->exists(), 404);
@@ -383,7 +384,7 @@ class AmsController extends Controller
 
     public function deleteLeaveType(Request $r, int $id)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('leave_types.manage'), 403);
         abort_unless(DB::table('leave_types')->where('id', $id)->whereNull('deleted_at')->exists(), 404);
         DB::table('leave_types')->where('id', $id)->update(['deleted_at' => now(), 'updated_at' => now()]);
         W::audit($r->user()->id, 'leave_type.deleted', (string) $id);
@@ -393,10 +394,11 @@ class AmsController extends Controller
 
     public function deleteUser(Request $r, int $id)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('users.manage'), 403);
         abort_if($id === $r->user()->id, 422, 'You cannot delete your own account.');
         DB::transaction(function () use ($r, $id) {
             $u = User::lockForUpdate()->findOrFail($id);
+            abort_if($u->isOwner() && ! $r->user()->isOwner(), 403);
             abort_if(DB::table('approvals')->join('applications', 'applications.id', '=', 'approvals.application_id')->where('reviewer_id', $id)->where('approvals.status', 'pending')->where('applications.status', 'pending')->exists(), 422, 'Resolve pending reviews before deleting this user.');
             abort_if(DB::table('applications')->where('user_id', $id)->where('status', 'pending')->exists(), 422, 'Resolve or cancel pending applications before deleting this user.');
             $u->update(['active' => false]);
@@ -413,7 +415,7 @@ class AmsController extends Controller
 
     public function importUsers(Request $r)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('users.import'), 403);
         $r->validate(['file' => 'required|file|max:2048']);
         $f = fopen($r->file('file')->path(), 'r');
         $header = fgetcsv($f, 0, ',', '"', '');
@@ -433,10 +435,11 @@ class AmsController extends Controller
             $row = array_combine($header, $values);
             $row['email'] = strtolower(trim($row['email']));
             $row['role'] = $row['role'] ?? 'employee';
+            abort_if($row['role'] !== 'employee' && ! $r->user()->isOwner(), 403, 'Only Owner can import non-Member role assignments.');
             $row['active'] = $row['active'] ?? 'true';
             abort_unless(in_array(strtolower($row['active']), ['true', 'false', '1', '0'], true), 422, "Invalid active value on row $line.");
             $row['active'] = in_array(strtolower($row['active']), ['true', '1'], true);
-            $v = validator($row, ['name' => 'required|string|max:150', 'email' => 'required|email|max:255|unique:users', 'password' => 'required|string|min:12', 'role' => 'required|in:owner,manager,pm,team_lead,employee', 'designation' => 'nullable|string|max:150', 'phone' => 'nullable|string|max:50']);
+            $v = validator($row, ['name' => 'required|string|max:150', 'email' => 'required|email|max:255|unique:users', 'password' => 'required|string|min:12', 'role' => ['required', Rule::exists('roles', 'slug')], 'designation' => 'nullable|string|max:150', 'phone' => 'nullable|string|max:50']);
             abort_if($v->fails(), 422, "CSV row $line: ".$v->errors()->first());
             abort_if(isset($emails[$row['email']]), 422, "Duplicate email on row $line.");
             $emails[$row['email']] = true;
@@ -456,7 +459,7 @@ class AmsController extends Controller
     public function document(Request $r, int $id)
     {
         $a = DB::table('applications')->where('id', $id)->first();
-        abort_unless($a && ($r->user()->role === 'owner' || $a->user_id === $r->user()->id || DB::table('approvals')->where('application_id', $id)->where('reviewer_id', $r->user()->id)->exists()), 404);
+        abort_unless($a && ($r->user()->hasPermission('applications.manage') || $a->user_id === $r->user()->id || DB::table('approvals')->where('application_id', $id)->where('reviewer_id', $r->user()->id)->exists()), 404);
         abort_unless($a->document && Storage::disk('local')->exists($a->document), 404);
 
         return Storage::disk('local')->download($a->document, $a->document_name, ['Cache-Control' => 'private, no-store', 'X-Content-Type-Options' => 'nosniff']);
@@ -469,7 +472,7 @@ class AmsController extends Controller
 
     public function saveCalendar(Request $r)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('calendar.manage'), 403);
         $d = $r->validate(['date' => 'required|date_format:Y-m-d', 'name' => 'required|string|max:150', 'is_working' => 'required|boolean']);
         DB::table('calendar_days')->updateOrInsert(['date' => $d['date']], $d);
 
@@ -478,7 +481,7 @@ class AmsController extends Controller
 
     public function deleteCalendar(Request $r, int $id)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('calendar.manage'), 403);
         DB::table('calendar_days')->where('id', $id)->delete();
 
         return ['message' => 'Calendar override removed'];
@@ -486,7 +489,7 @@ class AmsController extends Controller
 
     public function audit(Request $r)
     {
-        $this->owner($r);
+        abort_unless($r->user()->hasPermission('audit.view'), 403);
 
         return DB::table('audit_logs')->join('users', 'users.id', '=', 'audit_logs.actor_id')->select('audit_logs.*', 'users.name')->orderByDesc('audit_logs.id')->paginate(100);
     }

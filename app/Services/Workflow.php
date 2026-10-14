@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -24,28 +25,28 @@ class Workflow
             }
         }
 
-return $days;
+        return $days;
     }
 
     public static function reviewers(int $uid): array
     {
         $teams = DB::table('team_user')->where('user_id', $uid)->pluck('team_id');
-        $ids = DB::table('team_user')->join('users', 'users.id', '=', 'team_user.user_id')->whereIn('team_id', $teams)->whereIn('team_role', ['team_lead', 'manager', 'pm'])->where('users.active', true)->where('user_id', '!=', $uid)->pluck('user_id')->unique()->values()->all();
-        // Owner fallback only when a team has no eligible reviewer.
+        $members = DB::table('team_user')->whereIn('team_id', $teams)->get();
+        $eligible = User::with(['assignedRole.permissions', 'directPermissions'])->where('active', true)->where('id', '!=', $uid)->whereIn('id', $members->pluck('user_id'))->get()->filter(fn ($u) => $u->hasPermission('applications.review'))->pluck('id')->all();
+        $owners = User::whereHas('assignedRole', fn ($q) => $q->where('slug', 'owner'))->where('active', true)->where('id', '!=', $uid)->pluck('id')->all();
+        $ids = [];
         foreach ($teams as $team) {
-            $has = DB::table('team_user')->join('users', 'users.id', '=', 'team_user.user_id')->where('team_id', $team)->whereIn('team_role', ['team_lead', 'manager', 'pm'])->where('users.active', true)->where('user_id', '!=', $uid)->exists();
-            if (! $has) {
-                $ids = array_merge($ids, DB::table('users')->where('role', 'owner')->where('active', true)->where('id', '!=', $uid)->pluck('id')->all());
-            }
+            $reviewers = $members->where('team_id', $team)->whereIn('user_id', $eligible)->pluck('user_id')->all();
+            $ids = array_merge($ids, $reviewers ?: $owners);
         }
         if (! $teams->count()) {
-            $ids = DB::table('users')->where('role', 'owner')->where('active', true)->where('id', '!=', $uid)->pluck('id')->all();
+            $ids = $owners;
         }
         if (! $ids) {
             self::fail('Assign an eligible reviewer before submitting. Self-approval is not allowed.');
         }
 
-return array_values(array_unique($ids));
+        return array_values(array_unique($ids));
     }
 
     public static function audit(int $actor, string $action, string $subject): void
