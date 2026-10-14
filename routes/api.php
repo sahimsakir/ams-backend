@@ -5,6 +5,7 @@ use App\Http\Controllers\AmsController as C;
 use App\Http\Controllers\FaceController;
 use Illuminate\Support\Facades\Route;
 
+Route::get('/csrf-cookie', fn () => response()->json(['message' => 'CSRF cookie initialized']));
 Route::post('/login', [C::class, 'login'])->middleware('throttle:ams-login');
 Route::middleware(['token', 'throttle:ams-api'])->group(function () {
     Route::apiResource('roles', AccessController::class)->except(['show'])->parameters(['roles' => 'id']);

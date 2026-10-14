@@ -8,6 +8,7 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
+use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
 
 class AccessTest extends TestCase
@@ -35,15 +36,12 @@ class AccessTest extends TestCase
 
     private function asUser(User $u): static
     {
-        $token = bin2hex(random_bytes(32));
-        DB::table('access_tokens')->insert(['user_id' => $u->id, 'token_hash' => hash('sha256', $token), 'expires_at' => now()->addHour()]);
-
-        return $this->withToken($token);
+        return $this->passportSignIn($u);
     }
 
     public function test_initial_roles_and_relations_are_seeded(): void
     {
-        $this->assertSame(['Owner', 'Management', 'Project Manager', 'Team Lead', 'Members'], Role::orderBy('id')->pluck('name')->all());
+        $this->assertSame(['Owner', 'Management', 'Project Manager', 'Team Lead', 'Members'], Role::orderBy('id')->pluck('display_name')->all());
         $this->assertSame(Role::where('slug', 'employee')->value('id'), $this->member->role_id);
         $this->asUser($this->member)->getJson('/api/me')->assertJsonFragment(['role_name' => 'Members']);
     }
@@ -59,7 +57,8 @@ class AccessTest extends TestCase
         $this->postJson('/api/calendar', ['date' => '2026-10-22', 'name' => 'Holiday', 'is_working' => false])->assertOk();
         $this->postJson('/api/users', [])->assertForbidden();
         DB::table('role_permission')->where('role_id', $role)->delete();
-        DB::table('user_permission')->where('user_id', $this->member->id)->delete();
+        DB::table('model_has_permissions')->where('model_id', $this->member->id)->delete();
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
         $this->getJson('/api/users')->assertForbidden();
         $this->postJson('/api/calendar', [])->assertForbidden();
     }
@@ -75,7 +74,7 @@ class AccessTest extends TestCase
         $this->deleteJson('/api/roles/'.$rid)->assertUnprocessable();
         $this->deleteJson('/api/permissions/'.$pid)->assertOk();
         $this->assertDatabaseMissing('role_permission', ['permission_id' => $pid]);
-        $this->assertDatabaseMissing('user_permission', ['permission_id' => $pid]);
+        $this->assertDatabaseMissing('model_has_permissions', ['permission_id' => $pid]);
         $this->putJson('/api/users/'.$this->member->id.'/access', ['role_id' => Role::where('slug', 'employee')->value('id'), 'permission_ids' => []])->assertOk();
         $this->deleteJson('/api/roles/'.$rid)->assertOk();
     }

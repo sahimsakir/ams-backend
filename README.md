@@ -11,6 +11,7 @@ python3 scripts/setup-env.py
 docker compose config --quiet
 docker compose build
 docker compose run --rm api php artisan migrate --seed --force
+docker compose run --rm api php artisan ams:auth-setup
 docker compose up -d
 ```
 
@@ -24,6 +25,7 @@ Update both repositories together, then reload the frontend and open a new camer
 git pull --ff-only
 docker compose build api worker face
 docker compose run --rm api php artisan migrate --force
+docker compose run --rm api php artisan ams:auth-setup
 docker compose up -d --force-recreate api worker face
 docker compose exec api php artisan optimize:clear
 ```
@@ -77,6 +79,7 @@ Update this release:
 git pull --ff-only
 docker compose build api worker
 docker compose run --rm api php artisan migrate --force
+docker compose run --rm api php artisan ams:auth-setup
 docker compose up -d --force-recreate api worker
 docker compose exec api php artisan optimize:clear
 ```
@@ -92,16 +95,33 @@ Owners set same-day slots via `PUT /api/work-slots/users/{id}` or `/teams/{id}` 
 
 Run `docker compose build api worker`, `docker compose run --rm api php artisan migrate --force`, `docker compose up -d --force-recreate api worker`, and `docker compose exec api php artisan optimize:clear` after pulling. Then pull/restart the frontend.
 
-### Relational roles and permissions
+### Spatie roles and permissions
 
-Migration `000007` creates `roles`, `permissions`, `role_permission`, `user_permission` and role foreign keys on users/team assignments. Existing accounts map to Owner (`owner`), Management (`manager`), Project Manager (`pm`), Team Lead (`team_lead`), Members (`employee`). Legacy role strings are compatibility mirrors; permission checks use the relational assignment. One account role per user; direct permissions are additive. Unique pivot keys prevent duplicate grants. Custom roles cannot be deleted while assigned (including archived users/team memberships). Permission deletion cascades only grant records.
+Uses `spatie/laravel-permission` 6.x with `HasRoles`, `syncRoles`, `syncPermissions`, `hasPermissionTo`, and Laravel Gate integration. App Role/Permission extend Spatie models; the `api` guard is consistent across definitions and users. Spatie's role-permission table is configured as `role_permission` to preserve IDs/grants. `model_has_roles` and `model_has_permissions` are canonical account role/direct grant tables; `users.role_id` maintains the application's single-role constraint. Migration `000008` preserves existing grants and display labels. Legacy `user_permission` is retained only for migration rollback; runtime never reads it.
 
-Owner has all permissions and cannot remove their own Owner role. Only Owner manages role/permission definitions and role/direct-grant assignments. Initial roles cannot be deleted; their stable keys cannot be renamed. Owner is protected. Initial permission keys cannot change or be deleted because routes rely on them; custom definitions support create/update/delete. Owner-only attendance visibility remains an additional row-level restriction even for other roles with attendance permissions.
+Initial roles: Owner, Management, Project Manager, Team Lead, Members. Owner → Roles and Owner → Permissions are separate menus. People → Role & permissions assigns one account role and additive direct permissions. Stable built-in keys and Owner access are protected; custom definitions support create/edit/delete. Reassign assigned roles before deletion. Only Owner manages access definitions/assignments. Managers of users/teams may read role choices without gaining access administration. Attendance/photos of other users remain Owner-only. Review decisions also require an actual assigned approval and never permit self-approval.
 
-Existing feature routes use `permission:<key>` middleware, and `/me` returns `permissions`, `role_id`, `role_name`. Each request loads current relations: removing a grant applies to existing tokens without a cache-clear or new login. Team reviewers must hold `applications.review` and belong to the applicant's team; actual approval records still restrict decisions and forbid self-approval. Team memberships do not independently grant account permissions. CSV role values may use custom role keys; non-Owners with import permission can import Members only.
+Permission model `name` stores the stable action key (Spatie standard), while `display_name` stores the UI label; `slug` mirrors the key for API compatibility. `/me` returns `effective_permissions`, `role_id`, `role_name`. Definition/grant changes use Spatie cache-aware methods and apply to existing cookies on subsequent requests.
 
-New features: create a permission key such as `reports.export`, assign it through a role/direct grant, and protect the new route with `->middleware('permission:reports.export')` inside the authenticated token group. Use `$request->user()->hasPermission('reports.export')` for policies/services. Creating a permission definition alone does not implement a new feature; the feature must use the key and scope its data appropriately. Backend checks are authoritative; frontend controls mirror effective permissions.
+For a new feature, create an action key such as `reports.export`, grant it through role/direct permissions, then use `$user->can('reports.export')`, `$user->hasPermissionTo('reports.export', 'api')`, or the existing `permission:reports.export` route middleware. Owner bypass is applied by the app wrapper/Gate; raw Spatie `hasPermissionTo` checks literal grants. Implement row-level data scope separately. Defining a permission does not itself implement a feature.
 
-API: GET/POST `/roles`, PUT/DELETE `/roles/{id}`; GET/POST `/permissions`, PUT/DELETE `/permissions/{id}`; PUT `/users/{id}/access` with `role_id` and `permission_ids` (full direct-grant replacement). Role writes require `name`, `slug`, `permission_ids`. Permission writes require `name`, `slug`. Changes are audited.
+### Passport HttpOnly browser authentication
 
-Update: pull both repositories, rebuild `api worker`, run `docker compose run --rm api php artisan migrate --force`, recreate `api worker`, and run `docker compose exec api php artisan optimize:clear`. No reseeding is needed: the migration seeds access definitions and preserves existing user data, templates and history.
+Uses `laravel/passport` 13.x personal access tokens with an eight-hour expiry. Login JSON contains user data only. The token is stored in an encrypted, HttpOnly, SameSite=Lax, host-only cookie named `ams_auth`, scoped to `/api`. Client bearer headers are rejected. React uses `credentials: include`; no local/session storage token is read or written. Public OAuth token routes are disabled because this app exposes only cookie login. Logout revokes the current Passport token and clears the cookie; password changes and disabling/deleting a user revoke their tokens.
+
+API middleware encrypts cookies, starts a server-side session and checks Laravel CSRF tokens on all writes (including login/logout). GET `/api/csrf-cookie` initializes readable `XSRF-TOKEN`; clients send its URL-decoded value in `X-XSRF-TOKEN`. React initializes/retries once on 419. Only the CSRF token cookie is readable by JavaScript; the access token/session cookies are HttpOnly. Session rows store CSRF state; Passport validates authentication.
+
+Use the frontend's same-origin `/api` proxy in development and serve frontend/API under one origin in production. Production must use HTTPS and `SESSION_SECURE_COOKIE=true`. Local HTTP development uses `SESSION_SECURE_COOKIE=false`. The session/auth cookie SameSite policy remains Lax. Keep APP_KEY unchanged; it encrypts auth cookies and face templates.
+
+`ams:auth-setup` creates Passport signing keys in `storage/app/private/passport` and creates the personal access client if missing. It is idempotent and does not rotate existing keys. That directory is persisted by the private storage Docker volume, excluded from Git/build contexts, and must be backed up with your other private data. Run setup after migration and before the new API serves login. Do not use `passport:keys --force` during routine updates.
+
+Upgrade from the previous release:
+```bash
+git pull --ff-only
+docker compose build api worker
+docker compose run --rm api php artisan migrate --force
+docker compose run --rm api php artisan ams:auth-setup
+docker compose up -d --force-recreate api worker
+docker compose exec api php artisan optimize:clear
+```
+Existing users, roles, direct grants, enrollment and history are preserved. Previous custom bearer tokens are invalidated, so sign in again after pulling/restarting the frontend. No database reset or reseeding is needed.

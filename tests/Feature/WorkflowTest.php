@@ -56,10 +56,7 @@ class WorkflowTest extends TestCase
 
     private function asUser(User $u): static
     {
-        $token = bin2hex(random_bytes(32));
-        DB::table('access_tokens')->insert(['user_id' => $u->id, 'token_hash' => hash('sha256', $token), 'expires_at' => now()->addHour()]);
-
-        return $this->withToken($token);
+        return $this->passportSignIn($u);
     }
 
     private function payload(array $extra = []): array
@@ -163,8 +160,11 @@ class WorkflowTest extends TestCase
 
     public function test_login_and_logout_revoke_token(): void
     {
+        $this->passportSignIn($this->employee);
         $res = $this->postJson('/api/login', ['email' => $this->employee->email, 'password' => 'secure-password-123'])->assertOk();
-        $this->withToken($res->json('token'))->postJson('/api/logout')->assertOk();
+        $this->assertArrayNotHasKey('token', $res->json());
+        $this->assertTrue($res->getCookie('ams_auth', false)->isHttpOnly());
+        $this->postJson('/api/logout')->assertOk();
         $this->getJson('/api/me')->assertUnauthorized();
     }
 
@@ -321,6 +321,6 @@ class WorkflowTest extends TestCase
         $this->assertSame(['08:00', '17:00'], AttendanceReport::slot($this->employee->id));
         $this->putJson('/api/work-slots/users/'.$this->employee->id, ['slot_start' => '18:00', 'slot_end' => '09:00'])->assertUnprocessable();
         $this->putJson('/api/work-slots/users/'.$this->employee->id, ['slot_start' => null, 'slot_end' => null, 'slot_team_id' => $team->id])->assertOk();
-        $this->assertSame(['10:00', '19:00'],AttendanceReport::slot($this->employee->id));
+        $this->assertSame(['10:00', '19:00'], AttendanceReport::slot($this->employee->id));
     }
 }

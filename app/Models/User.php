@@ -5,13 +5,21 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Laravel\Passport\Contracts\OAuthenticatable;
+use Laravel\Passport\HasApiTokens;
+use Spatie\Permission\Traits\HasRoles;
 
-class User extends Authenticatable
+class User extends Authenticatable implements OAuthenticatable
 {
+    use HasApiTokens;
+    use HasRoles;
     use Notifiable;
+
+    protected $guard_name = 'api';
+
     use SoftDeletes;
 
-    protected $appends = ['permissions', 'role_name'];
+    protected $appends = ['effective_permissions', 'role_name'];
 
     protected $guarded = ['id'];
 
@@ -29,6 +37,11 @@ class User extends Authenticatable
                 $u->role_id = Role::where('slug', $u->role ?? 'employee')->value('id');
             }
         });
+        static::saved(function (User $u) {
+            if ($u->role_id) {
+                $u->syncRoles(Role::findOrFail($u->role_id));
+            }
+        });
     }
 
     public function teams()
@@ -43,31 +56,31 @@ class User extends Authenticatable
 
     public function directPermissions()
     {
-        return $this->belongsToMany(Permission::class, 'user_permission');
+        return $this->permissions();
     }
 
     public function isOwner(): bool
     {
-        return $this->assignedRole?->slug === 'owner';
+        return $this->hasRole('owner', 'api');
     }
 
     public function getRoleNameAttribute(): ?string
     {
-        return $this->assignedRole?->name;
+        return $this->assignedRole?->display_name;
     }
 
-    public function getPermissionsAttribute(): array
+    public function getEffectivePermissionsAttribute(): array
     {
-        if ($this->isOwner()) {
-            return Permission::pluck('slug')->all();
-        }
-
-        return collect($this->assignedRole?->permissions->pluck('slug')->all() ?? [])->merge($this->directPermissions->pluck('slug'))->unique()->values()->all();
+        return $this->isOwner() ? Permission::pluck('name')->all() : $this->getAllPermissions()->pluck('name')->values()->all();
     }
 
     public function hasPermission(string $permission): bool
     {
-        return $this->isOwner() || in_array($permission, $this->permissions, true);
+        if ($this->isOwner()) {
+            return true;
+        }
+
+        return $this->checkPermissionTo($permission, 'api');
     }
 
     protected function casts(): array

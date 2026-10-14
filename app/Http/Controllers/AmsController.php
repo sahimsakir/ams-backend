@@ -6,6 +6,7 @@ use App\Models\Role;
 use App\Models\User;
 use App\Notifications\ApplicationNotice;
 use App\Services\AttendanceReport;
+use App\Services\BrowserAuth;
 use App\Services\FaceProof;
 use App\Services\Workflow as W;
 use Carbon\CarbonImmutable;
@@ -28,17 +29,19 @@ class AmsController extends Controller
         $d = $r->validate(['email' => 'required|email', 'password' => 'required|string']);
         $u = User::where('email', $d['email'])->first();
         abort_unless($u && $u->active && Hash::check($d['password'], $u->password), 401, 'Invalid credentials.');
-        $t = bin2hex(random_bytes(32));
-        DB::table('access_tokens')->insert(['user_id' => $u->id, 'token_hash' => hash('sha256', $t), 'expires_at' => now()->addHours(8)]);
+        $r->session()->regenerate();
+        $issued = $u->createToken('AMS browser');
 
-        return ['token' => $t, 'user' => $u];
+        return response()->json(['user' => $u])->cookie(BrowserAuth::cookie($issued->accessToken));
     }
 
     public function logout(Request $r)
     {
-        DB::table('access_tokens')->where('token_hash', hash('sha256', $r->bearerToken()))->delete();
+        $r->user()->token()->revoke();
+        $r->session()->invalidate();
+        $r->session()->regenerateToken();
 
-        return ['message' => 'Signed out'];
+        return response()->json(['message' => 'Signed out'])->cookie(BrowserAuth::forget());
     }
 
     public function password(Request $r)
@@ -46,9 +49,9 @@ class AmsController extends Controller
         $d = $r->validate(['current_password' => 'required', 'password' => 'required|string|min:12|confirmed']);
         abort_unless(Hash::check($d['current_password'], $r->user()->password), 422, 'Current password incorrect');
         $r->user()->update(['password' => $d['password']]);
-        DB::table('access_tokens')->where('user_id', $r->user()->id)->delete();
+        BrowserAuth::revokeUser($r->user()->id);
 
-        return ['message' => 'Password changed. Sign in again.'];
+        return response()->json(['message' => 'Password changed. Sign in again.'])->cookie(BrowserAuth::forget());
     }
 
     public function me(Request $r)
@@ -324,6 +327,9 @@ class AmsController extends Controller
             unset($d['password']);
         }$u = $id ? User::findOrFail($id) : new User;
         $u->fill($d)->save();
+        if ($id && (! empty($d['password']) || ! $d['active'])) {
+            BrowserAuth::revokeUser($u->id);
+        }
         W::audit($r->user()->id, 'user.saved', (string) $u->id);
 
         return $u;
@@ -403,7 +409,7 @@ class AmsController extends Controller
             abort_if(DB::table('applications')->where('user_id', $id)->where('status', 'pending')->exists(), 422, 'Resolve or cancel pending applications before deleting this user.');
             $u->update(['active' => false]);
             $u->delete();
-            DB::table('access_tokens')->where('user_id', $id)->delete();
+            BrowserAuth::revokeUser($id);
             DB::table('team_user')->where('user_id', $id)->delete();
             DB::table('face_profiles')->where('user_id', $id)->delete();
             DB::table('face_challenges')->where(fn ($q) => $q->where('user_id', $id)->orWhere('subject_id', $id))->update(['expires_at' => now()]);

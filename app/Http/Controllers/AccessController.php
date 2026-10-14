@@ -44,7 +44,7 @@ class AccessController extends Controller
     private function saveRole(Request $r, ?int $id = null)
     {
         $this->owner($r);
-        $d = $r->validate(['name' => ['required', 'string', 'max:100', Rule::unique('roles')->ignore($id)], 'slug' => ['required', 'regex:/^[a-z][a-z0-9_]*$/', 'max:100', Rule::unique('roles')->ignore($id)], 'permission_ids' => 'present|array', 'permission_ids.*' => 'integer|distinct|exists:permissions,id']);
+        $d = $r->validate(['name' => ['required', 'string', 'max:100', Rule::unique('roles', 'display_name')->ignore($id)], 'slug' => ['required', 'regex:/^[a-z][a-z0-9_]*$/', 'max:100', Rule::unique('roles', 'slug')->ignore($id)], 'permission_ids' => 'present|array', 'permission_ids.*' => 'integer|distinct|exists:permissions,id']);
 
         return DB::transaction(function () use ($r, $id, $d) {
             $role = $id ? Role::lockForUpdate()->findOrFail($id) : new Role;
@@ -53,8 +53,8 @@ class AccessController extends Controller
             }
             abort_if($role->system && $role->slug !== $d['slug'], 422, 'Initial role keys cannot be changed.');
             abort_if($d['slug'] === 'owner', 422, 'The Owner key is reserved.');
-            $role->fill(['name' => $d['name'], 'slug' => $d['slug']])->save();
-            $role->permissions()->sync($d['permission_ids']);
+            $role->fill(['display_name' => $d['name'], 'name' => $d['slug'], 'slug' => $d['slug'], 'guard_name' => 'api'])->save();
+            $role->syncPermissions(Permission::whereIn('id', $d['permission_ids'])->get());
             // Compatibility labels only; permission checks use role_id relations.
             DB::table('users')->where('role_id', $role->id)->update(['role' => $role->slug]);
             DB::table('team_user')->where('team_role_id', $role->id)->update(['team_role' => $role->slug]);
@@ -86,7 +86,7 @@ class AccessController extends Controller
         return DB::transaction(function () use ($r, $id, $d) {
             $p = $id ? Permission::lockForUpdate()->findOrFail($id) : new Permission;
             abort_if($p->system && $p->slug !== $d['slug'], 422, 'Built-in permission keys cannot change.');
-            $p->fill($d)->save();
+            $p->fill(['display_name' => $d['name'], 'name' => $d['slug'], 'slug' => $d['slug'], 'guard_name' => 'api'])->save();
             Workflow::audit($r->user()->id, 'permission.saved', (string) $p->id);
 
             return $p;
@@ -116,7 +116,7 @@ class AccessController extends Controller
             $u = User::lockForUpdate()->findOrFail($id);
             abort_if($id === $r->user()->id && $role->slug !== 'owner', 422, 'You cannot remove your own Owner role.');
             $u->update(['role_id' => $role->id]);
-            $u->directPermissions()->sync($d['permission_ids']);
+            $u->syncPermissions(Permission::whereIn('id', $d['permission_ids'])->get());
             Workflow::audit($r->user()->id, 'user.access.updated', (string) $id);
 
             return ['message' => 'User access saved'];

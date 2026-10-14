@@ -35,9 +35,7 @@ class FaceChallengeTest extends TestCase
 
     private function signIn(User $u): void
     {
-        $token = bin2hex(random_bytes(32));
-        DB::table('access_tokens')->insert(['user_id' => $u->id, 'token_hash' => hash('sha256', $token), 'expires_at' => now()->addHour()]);
-        $this->withToken($token);
+        $this->passportSignIn($u);
     }
 
     private function start(string $purpose = 'enroll'): array

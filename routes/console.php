@@ -3,6 +3,8 @@
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Laravel\Passport\ClientRepository;
+use Laravel\Passport\Token;
 
 Artisan::command('ams:prune {--days=90 : Delete attendance photos older than this many days}', function () {
     $days = filter_var($this->option('days'), FILTER_VALIDATE_INT);
@@ -11,7 +13,7 @@ Artisan::command('ams:prune {--days=90 : Delete attendance photos older than thi
 
         return 1;
     }
-    DB::table('access_tokens')->where('expires_at', '<', now())->delete();
+    Token::where('expires_at', '<', now())->delete();
     DB::table('face_challenges')->where('expires_at', '<', now())->orderBy('id')->chunkById(100, function ($rows) {
         foreach ($rows as $row) {
             if ($row->photo) {
@@ -30,3 +32,25 @@ Artisan::command('ams:prune {--days=90 : Delete attendance photos older than thi
     });
     $this->info("Pruned photos for {$count} closed attendance records; timestamps retained.");
 })->purpose('Apply the attendance photo retention policy and remove expired access tokens');
+
+Artisan::command('ams:auth-setup', function () {
+    $dir = storage_path('app/private/passport');
+    if (! is_dir($dir)) {
+        mkdir($dir, 0700, true);
+    }
+    $private = $dir.'/oauth-private.key';
+    $public = $dir.'/oauth-public.key';
+    if (file_exists($private) !== file_exists($public)) {
+        throw new RuntimeException('Passport key pair incomplete; restore matching keys.');
+    }
+    if (! file_exists($private)) {
+        $this->call('passport:keys');
+    }
+    $repository = app(ClientRepository::class);
+    try {
+        $repository->personalAccessClient('users');
+    } catch (RuntimeException $e) {
+        $repository->createPersonalAccessGrantClient('AMS Browser', 'users');
+    }
+    $this->info('Passport browser authentication is ready. Existing keys retained.');
+})->purpose('Create persistent Passport keys and personal access client without rotating keys');

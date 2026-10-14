@@ -1,14 +1,19 @@
 <?php
 
+use App\Http\Middleware\CookieCsrf;
 use App\Http\Middleware\RequirePermission;
 use App\Http\Middleware\TokenAuth;
+use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
+use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Session\Middleware\StartSession;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(api: __DIR__.'/../routes/api.php', commands: __DIR__.'/../routes/console.php', health: '/up')
     ->withMiddleware(function (Middleware $m) {
+        $m->api(prepend: [EncryptCookies::class, AddQueuedCookiesToResponse::class, StartSession::class, CookieCsrf::class]);
         $m->alias(['token' => TokenAuth::class, 'permission' => RequirePermission::class]);
     })
     ->withExceptions(function (Exceptions $e) {
