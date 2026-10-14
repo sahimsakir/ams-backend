@@ -8,6 +8,7 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class ActionPermissionsTest extends TestCase
@@ -50,7 +51,17 @@ class ActionPermissionsTest extends TestCase
             DB::table('attendances')->insert(['user_id' => $u->id, 'work_date' => $day, 'check_in' => now(), 'in_photo' => 'private.jpg', 'in_distance' => .1, 'mode' => 'office']);
             DB::table('applications')->insert(['user_id' => $u->id, 'kind' => 'home_office', 'start_date' => $day, 'end_date' => $day, 'reason' => 'Remote work']);
         }
-        $this->passportSignIn($lead)->getJson('/api/attendance')->assertOk()->assertJsonCount(2, 'data');
+        Storage::fake('local');
+        Storage::disk('local')->put('private.jpg', 'photo');
+        $this->passportSignIn($lead)->getJson('/api/attendance')->assertOk()->assertJsonCount(2, 'data')->assertJsonPath('data.0.can_view_photo', true);
+        $memberRecord = DB::table('attendances')->where('user_id', $one->id)->value('id');
+        $outsideRecord = DB::table('attendances')->where('user_id', $outside->id)->value('id');
+        $this->get('/api/attendance/'.$memberRecord.'/photo/in')->assertOk();
+        $this->get('/api/attendance/'.$outsideRecord.'/photo/in')->assertNotFound();
+        $lead->assignedRole->revokePermissionTo('attendance.photo_view_team');
+        $this->get('/api/attendance/'.$memberRecord.'/photo/in')->assertNotFound();
+        $this->grant($lead, ['attendance.photo_view_team']);
+        $this->get('/api/attendance/'.$memberRecord.'/photo/in')->assertOk();
         $this->getJson('/api/attendance?user_id='.$outside->id)->assertForbidden();
         $this->getJson('/api/attendance/people')->assertOk()->assertJsonCount(3);
         $this->getJson('/api/applications')->assertOk()->assertJsonCount(2, 'data');

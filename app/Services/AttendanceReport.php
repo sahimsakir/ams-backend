@@ -92,7 +92,7 @@ class AttendanceReport
                 } elseif ($key <= $today) {
                     $s['leave_days']++;
                 }
-                $rows[] = ['id' => $a ? $a->id : 'leave-'.$u->id.'-'.$key, 'user_id' => $u->id, 'name' => $u->name, 'work_date' => $key, 'check_in' => $in?->utc()->toISOString(), 'check_out' => $out?->utc()->toISOString(), 'mode' => $a ? $a->mode : 'leave', 'leave_name' => $leave?->leave_name, 'status' => $status, 'slot_start' => substr($from, 0, 5), 'slot_end' => substr($to, 0, 5), 'working_minutes' => $elapsed === null ? null : round($elapsed), 'actual_minutes' => $inside === null ? null : round($inside)];
+                $rows[] = ['id' => $a ? $a->id : 'leave-'.$u->id.'-'.$key, 'user_id' => $u->id, 'has_in_photo' => (bool) ($a?->in_photo), 'has_out_photo' => (bool) ($a?->out_photo), 'name' => $u->name, 'work_date' => $key, 'check_in' => $in?->utc()->toISOString(), 'check_out' => $out?->utc()->toISOString(), 'mode' => $a ? $a->mode : 'leave', 'leave_name' => $leave?->leave_name, 'status' => $status, 'slot_start' => substr($from, 0, 5), 'slot_end' => substr($to, 0, 5), 'working_minutes' => $elapsed === null ? null : round($elapsed), 'actual_minutes' => $inside === null ? null : round($inside)];
             }
         }
         usort($rows, fn ($a, $b) => strcmp($b['work_date'], $a['work_date']) ?: strcmp($a['name'], $b['name']));

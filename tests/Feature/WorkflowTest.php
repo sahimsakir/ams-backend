@@ -287,10 +287,13 @@ class WorkflowTest extends TestCase
         return DB::table('attendances')->insertGetId(['user_id' => $u->id, 'work_date' => $date, 'check_in' => $in, 'check_out' => $out, 'mode' => $mode, 'in_photo' => 'private.jpg', 'in_distance' => 0.1, 'slot_start' => '09:00', 'slot_end' => '18:00']);
     }
 
-    public function test_team_lead_sees_team_attendance_but_not_team_photos_by_default(): void
+    public function test_team_lead_sees_team_attendance_and_photos_but_pm_requires_grants(): void
     {
         $this->travelTo(CarbonImmutable::parse('2026-10-21 12:00', 'Asia/Dhaka'));
         $id = $this->reportRecord($this->employee, '2026-10-18', '2026-10-18 03:00:00', '2026-10-18 12:00:00');
+        Storage::fake('local');
+        Storage::disk('local')->put('private.jpg', 'photo');
+        DB::table('attendances')->where('id', $id)->update(['out_photo' => 'private.jpg']);
         foreach ([$this->lead, $this->pm] as $u) {
             $this->asUser($u)->getJson('/api/attendance')->assertJsonCount($u->id === $this->lead->id ? 1 : 0, 'data');
             if ($u->id === $this->lead->id) {
@@ -298,7 +301,8 @@ class WorkflowTest extends TestCase
             } else {
                 $this->getJson('/api/attendance?user_id='.$this->employee->id)->assertForbidden();
             }
-            $this->get('/api/attendance/'.$id.'/photo/in')->assertNotFound();
+            $this->get('/api/attendance/'.$id.'/photo/in')->assertStatus($u->id === $this->lead->id ? 200 : 404);
+            $this->get('/api/attendance/'.$id.'/photo/out')->assertStatus($u->id === $this->lead->id ? 200 : 404);
         }
         $this->asUser($this->owner)->getJson('/api/attendance')->assertJsonCount(1, 'data');
     }

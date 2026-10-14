@@ -302,6 +302,10 @@ class AmsController extends Controller
         abort_if(isset($d['user_id']) && ! in_array((int) $d['user_id'], $this->visible($r), true), 403);
         $uids = isset($d['user_id']) ? [(int) $d['user_id']] : $this->visible($r);
         $report = AttendanceReport::build($uids, $start, $end);
+        foreach ($report['data'] as &$row) {
+            $row['can_view_photo'] = $r->user()->hasPermission('attendance.photo_view_all') || ($r->user()->hasPermission('attendance.photo_view_team') && in_array((int) $row['user_id'], Visibility::teamUsers($r->user()), true)) || ((int) $row['user_id'] === $r->user()->id && $r->user()->hasPermission('attendance.photo_view_self'));
+        }
+        unset($row);
         [$report['data'],$facets] = TableFilters::array($r, $report['data'], ['name', 'work_date', 'check_in', 'check_out', 'mode', 'leave_name', 'status', 'slot_start', 'slot_end', 'working_minutes', 'actual_minutes']);
         $report['facets'] = $facets;
         $page = max(1, (int) $r->query('page', 1));
