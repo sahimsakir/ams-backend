@@ -8,6 +8,7 @@ use App\Notifications\ApplicationNotice;
 use App\Services\AttendanceReport;
 use App\Services\BrowserAuth;
 use App\Services\FaceProof;
+use App\Services\TableFilters;
 use App\Services\Workflow as W;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
@@ -228,6 +229,9 @@ class AmsController extends Controller
                 $leave = DB::table('applications')->where('user_id', $uid)->where('kind', 'leave')->where('status', 'approved')->where('start_date', '<=', $today)->where('end_date', '>=', $today)->exists();
                 abort_if($leave, 422, 'You are on approved leave.');
                 $home = DB::table('applications')->where('user_id', $uid)->where('kind', 'home_office')->where('status', 'approved')->where('start_date', '<=', $today)->where(fn ($q) => $q->whereNull('end_date')->orWhere('end_date', '>=', $today))->exists();
+                $teamIds = DB::table('team_user')->where('user_id', $uid)->pluck('team_id');
+                $teamHome = DB::table('team_home_office')->whereNull('cancelled_at')->where('start_date', '<=', $today)->where('end_date', '>=', $today)->where(fn ($q) => $q->whereIn('team_id', $teamIds)->orWhere(fn ($q) => $q->whereNull('team_id')->whereRaw($teamIds->isNotEmpty() ? '1=1' : '1=0')))->exists();
+                $home = $home || $teamHome;
                 $path = 'attendance/'.Str::uuid().'.jpg';
                 abort_unless(Storage::disk('local')->copy($proof->photo, $path), 503, 'Could not save attendance photo. Try again.');
                 try {
@@ -264,6 +268,8 @@ class AmsController extends Controller
         abort_if(! $r->user()->isOwner() && isset($d['user_id']) && (int) $d['user_id'] !== $r->user()->id, 403);
         $uids = isset($d['user_id']) ? [(int) $d['user_id']] : $this->visible($r);
         $report = AttendanceReport::build($uids, $start, $end);
+        [$report['data'],$facets] = TableFilters::array($r, $report['data'], ['name', 'work_date', 'check_in', 'check_out', 'mode', 'leave_name', 'status', 'slot_start', 'slot_end', 'working_minutes', 'actual_minutes']);
+        $report['facets'] = $facets;
         $page = max(1, (int) $r->query('page', 1));
         $count = count($report['data']);
         $report['data'] = array_slice($report['data'], ($page - 1) * 100, 100);
@@ -497,6 +503,10 @@ class AmsController extends Controller
     {
         abort_unless($r->user()->hasPermission('audit.view'), 403);
 
-        return DB::table('audit_logs')->join('users', 'users.id', '=', 'audit_logs.actor_id')->select('audit_logs.*', 'users.name')->orderByDesc('audit_logs.id')->paginate(100);
+        $base = DB::table('audit_logs')->join('users', 'users.id', '=', 'audit_logs.actor_id');
+        [$query,$facets] = TableFilters::query($r, $base, ['name' => 'users.name', 'action' => 'audit_logs.action', 'subject' => 'audit_logs.subject', 'created_at' => 'audit_logs.created_at']);
+        $page = $query->select('audit_logs.*', 'users.name')->paginate(100)->toArray();
+
+        return [...$page, 'facets' => $facets];
     }
 }

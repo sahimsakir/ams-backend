@@ -125,3 +125,11 @@ docker compose up -d --force-recreate api worker
 docker compose exec api php artisan optimize:clear
 ```
 Existing users, roles, direct grants, enrollment and history are preserved. Previous custom bearer tokens are invalidated, so sign in again after pulling/restarting the frontend. No database reset or reseeding is needed.
+
+### Table filters and team home office
+
+Attendance and audit support spreadsheet-style column filters and sorting across all scoped records before pagination. `filters` is a JSON object keyed by whitelisted columns; each value can contain `text` (case-insensitive literal substring) and/or `values` (exact string selections). `sort` is a whitelisted column and `direction` is `asc`/`desc`. Responses include column `facets` (up to 500 options per column); text matching searches the full dataset. Attendance summary cards follow date/user scope and remain independent of column filters. Data scope remains enforced before filtering.
+
+Migration `000009` adds `team_home_office` and the Spatie permission `home_office.manage`. Owner automatically has access; assign this permission to a designated role or directly to a user. GET/POST `/api/team-home-office`, DELETE `/api/team-home-office/{id}`. POST fields: nullable `team_id` (null = all teams), `start_date`, `end_date` (inclusive, no one-year cap), and `reason` (5–2000 characters). All teams includes members of any team and excludes unassigned users. Current membership determines coverage at check-in; new members inherit active ranges. Any active matching assignment or approved personal home office sets new attendance mode to home office. Approved leave still prevents check-in. No attendance is fabricated. Assignments can overlap; cancellation stops that assignment, preserves its audit record and existing attendance, and does not override another active range or approved personal arrangement. Existing attendance is not retroactively changed.
+
+Update: pull both repos, rebuild API/worker, run migrations, recreate API/worker and clear caches. No new Passport key setup, reseeding or face rebuild is needed if already on the Passport release.

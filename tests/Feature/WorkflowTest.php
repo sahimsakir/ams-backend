@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Permission;
 use App\Models\User;
 use App\Services\AttendanceReport;
 use App\Services\Workflow;
@@ -322,5 +323,79 @@ class WorkflowTest extends TestCase
         $this->putJson('/api/work-slots/users/'.$this->employee->id, ['slot_start' => '18:00', 'slot_end' => '09:00'])->assertUnprocessable();
         $this->putJson('/api/work-slots/users/'.$this->employee->id, ['slot_start' => null, 'slot_end' => null, 'slot_team_id' => $team->id])->assertOk();
         $this->assertSame(['10:00', '19:00'], AttendanceReport::slot($this->employee->id));
+    }
+
+    public function test_team_home_office_authorization_and_check_in_mode(): void
+    {
+        $today = now('Asia/Dhaka')->toDateString();
+        $team = DB::table('teams')->first();
+        $data = ['team_id' => $team->id, 'start_date' => $today, 'end_date' => $today, 'reason' => 'Office maintenance'];
+        $this->asUser($this->employee)->postJson('/api/team-home-office', $data)->assertForbidden();
+        $permission = Permission::where('name', 'home_office.manage')->first();
+        $this->lead->givePermissionTo($permission);
+        $id = $this->asUser($this->lead)->postJson('/api/team-home-office', $data)->assertCreated()->json('id');
+        $this->getJson('/api/team-home-office')->assertOk()->assertJsonPath('data.0.team_id', $team->id);
+        $this->face();
+        $this->punch('in')->assertOk()->assertJsonPath('attendance.mode', 'home_office');
+        $this->asUser($this->lead)->deleteJson('/api/team-home-office/'.$id)->assertOk();
+        $this->assertDatabaseHas('attendances', ['user_id' => $this->employee->id, 'mode' => 'home_office']);
+        $this->deleteJson('/api/team-home-office/'.$id)->assertStatus(409);
+    }
+
+    public function test_all_teams_assignment_excludes_unassigned_users_and_applies_on_future_dates(): void
+    {
+        $today = now('Asia/Dhaka')->toDateString();
+        $this->asUser($this->owner)->postJson('/api/team-home-office', ['team_id' => null, 'start_date' => $today, 'end_date' => '2030-12-31', 'reason' => 'Remote arrangement'])->assertCreated();
+        $this->face();
+        $this->punch('in')->assertOk()->assertJsonPath('attendance.mode', 'home_office');
+        // The owner is not a member of any team and is not covered by All teams.
+        $this->assertSame(0, DB::table('team_user')->where('user_id', $this->owner->id)->count());
+        $member = $this->employee;
+        $this->employee = $this->owner;
+        $this->punch('in')->assertOk()->assertJsonPath('attendance.mode', 'office');
+        $this->employee = $member;
+        $this->asUser($this->owner)->postJson('/api/team-home-office', ['team_id' => null, 'start_date' => $today, 'end_date' => '2020-01-01', 'reason' => 'Invalid range'])->assertUnprocessable();
+    }
+
+    public function test_attendance_column_filters_and_sorting_apply_before_pagination(): void
+    {
+        $rows = [];
+        $date = CarbonImmutable::parse('2026-01-01');
+        for ($n = 0; $n < 120; $n++) {
+            $key = $date->addDays($n)->toDateString();
+            $rows[] = ['user_id' => $this->employee->id, 'work_date' => $key, 'check_in' => $key.' 03:00:00', 'mode' => 'office', 'in_photo' => 'private.jpg', 'in_distance' => .1, 'slot_start' => '09:00', 'slot_end' => '18:00'];
+        }
+        DB::table('attendances')->insert($rows);
+        $filter = urlencode(json_encode(['work_date' => ['values' => ['2026-01-01']]]));
+        $this->asUser($this->employee)->getJson('/api/attendance?start_date=2026-01-01&end_date=2026-05-01&filters='.$filter)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.work_date', '2026-01-01')->assertJsonPath('total', 1);
+        $this->getJson('/api/attendance?start_date=2026-01-01&end_date=2026-05-01&sort=work_date&direction=asc')->assertOk()->assertJsonPath('data.0.work_date', '2026-01-01')->assertJsonPath('last_page', 2);
+        $this->getJson('/api/attendance?sort=invalid')->assertUnprocessable();
+    }
+
+    public function test_audit_filters_escape_literal_wildcards_and_sort_before_pagination(): void
+    {
+        $rows = [];
+        for ($n = 0; $n < 120; $n++) {
+            $rows[] = ['actor_id' => $this->owner->id, 'action' => 'ordinary', 'subject' => (string) $n, 'created_at' => now()];
+        }
+        $rows[0]['action'] = 'team_home_office.created';
+        $rows[0]['subject'] = 'special_%';
+        DB::table('audit_logs')->insert($rows);
+        $filter = urlencode(json_encode(['subject' => ['text' => 'special_%']]));
+        $this->asUser($this->owner)->getJson('/api/audit?filters='.$filter)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.subject', 'special_%');
+        $this->getJson('/api/audit?sort=subject&direction=asc')->assertOk()->assertJsonPath('last_page', 2);
+    }
+
+    public function test_team_home_office_date_boundaries_are_inclusive(): void
+    {
+        $tomorrow = now('Asia/Dhaka')->addDay()->toDateString();
+        $team = DB::table('teams')->first();
+        $this->asUser($this->owner)->postJson('/api/team-home-office', ['team_id' => $team->id, 'start_date' => $tomorrow, 'end_date' => $tomorrow, 'reason' => 'Maintenance tomorrow'])->assertCreated();
+        $this->face();
+        $this->punch('in')->assertOk()->assertJsonPath('attendance.mode', 'office');
+        $this->travel(1)->days();
+        $this->punch('in')->assertOk()->assertJsonPath('attendance.mode', 'home_office');
+        $this->travel(1)->days();
+        $this->punch('in')->assertOk()->assertJsonPath('attendance.mode', 'office');
     }
 }

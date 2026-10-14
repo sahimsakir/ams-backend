@@ -3,6 +3,7 @@
 use App\Http\Controllers\AccessController;
 use App\Http\Controllers\AmsController as C;
 use App\Http\Controllers\FaceController;
+use App\Http\Controllers\TeamHomeOfficeController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/csrf-cookie', fn () => response()->json(['message' => 'CSRF cookie initialized']));
@@ -14,6 +15,9 @@ Route::middleware(['token', 'throttle:ams-api'])->group(function () {
     Route::put('/permissions/{id}', [AccessController::class, 'savePermission']);
     Route::delete('/permissions/{id}', [AccessController::class, 'deletePermission']);
     Route::put('/users/{id}/access', [AccessController::class, 'assign']);
+    Route::get('/team-home-office', [TeamHomeOfficeController::class, 'index'])->middleware('permission:home_office.manage');
+    Route::post('/team-home-office', [TeamHomeOfficeController::class, 'store'])->middleware('permission:home_office.manage');
+    Route::delete('/team-home-office/{id}', [TeamHomeOfficeController::class, 'destroy'])->middleware('permission:home_office.manage');
     Route::get('/me', [C::class, 'me']);
     Route::post('/logout', [C::class, 'logout']);
     Route::put('/password', [C::class, 'password']);
