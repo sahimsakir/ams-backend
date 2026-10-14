@@ -55,7 +55,7 @@ General authenticated rate limit: 120 requests/minute. Face challenge and attend
 
 ## Guided camera protocol
 
-Start a session with `POST /face/challenges` and `{ "purpose": "enroll", "consent": true }`. The response has `id`, zero-based `step`, `total`, current `pose`, `nonce`, `complete`, and ISO `expires_at`. Only the next required pose is returned. Enrollment and attendance each require exactly three steps: front, one random left/right turn, and open/closed/open eyes.
+Start a session with `POST /face/challenges` and `{ "purpose": "enroll", "consent": true }`. The response has `id`, zero-based `step`, `total`, current `pose`, `nonce`, `complete`, and ISO `expires_at`. Only the next required pose is returned. Enrollment requires exactly three steps: front, left, right. Attendance still requires front, one random left/right turn, and open/closed/open eyes.
 
 For each prompt, capture a fresh burst from the live camera. Send the returned nonce and `frames[]` to the step endpoint. At least four frames are required; the frontend sends sixteen for open/closed/open eyes. The server checks one face throughout, identity, landmark movement, duplicate frames, session owner, nonce and expiry. It advances only after successful verification. Retry the same prompt on a 422; restart an expired session. A new session revokes all previous sessions for the target person, including sessions started by an owner. Sessions expire after ten minutes, and completed results expire after two minutes. Never trust client-provided match scores or completion flags.
 

@@ -25,7 +25,7 @@ docker compose exec api php artisan test
 docker compose logs --tail=100 api worker face
 ```
 
-35 automated tests (203 assertions) passed with SQLite; Docker/PostgreSQL runtime and actual face accuracy have not been verified here. See docs/VALIDATION.md. Mailpit captures local email; configure MAIL_HOST/PORT/USERNAME/PASSWORD and FROM settings for delivery and recreate API/worker.
+35 automated tests (200 assertions) passed with SQLite; Docker/PostgreSQL runtime and actual face accuracy have not been verified here. See docs/VALIDATION.md. Mailpit captures local email; configure MAIL_HOST/PORT/USERNAME/PASSWORD and FROM settings for delivery and recreate API/worker.
 
 ## Policy
 
@@ -50,7 +50,7 @@ docker compose up -d --force-recreate api worker face
 
 Keep your existing `.env`, `APP_KEY`, database and volumes. Do not rerun initial environment generation or seed/reset production data for this update. Every role must enroll before accessing the workspace. Owners can also enroll other users from People after completing their own enrollment. Existing profiles need the guided upgrade; they must match the previous template, unless an owner resets it. A verified enrollment cannot be silently overwritten.
 
-Enrollment and attendance each use three checks: look forward, turn slightly left or right, and close/reopen the eyes. Simple visual examples and capture instructions explain each step. Enrollment opens automatically after login and cannot be dismissed; only enrollment and sign-out are available until it passes. The API also blocks other workspace features for unenrolled accounts. Timestamps come from the server and include full dates and seconds in the frontend. Open overnight shifts remain available for checkout.
+Enrollment uses three checks: look forward, look left, and look right. Attendance retains its front, random left/right turn, and eye close/open checks. Simple visual examples and capture instructions explain each step. Enrollment opens automatically after login and cannot be dismissed; only enrollment and sign-out are available until it passes. The API also blocks other workspace features for unenrolled accounts. Timestamps come from the server and include full dates and seconds in the frontend. Open overnight shifts remain available for checkout.
 
 For mobile access, use the frontend README's trusted HTTPS setup. The API can stay bound to `127.0.0.1:8000`; Vite proxies `/api` to it, including camera bursts. A deployed reverse proxy must allow at least 12 MB request bodies and a 120-second upstream timeout. Only expose the HTTPS frontend/API gateway, never the internal face service.
 

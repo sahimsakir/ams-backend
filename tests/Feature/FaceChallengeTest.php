@@ -84,11 +84,7 @@ class FaceChallengeTest extends TestCase
     {
         $c = $this->start();
         $steps = json_decode(DB::table('face_challenges')->where('id', $c['id'])->value('steps'), true);
-        $this->assertCount(3, $steps);
-        foreach (['front', 'blink'] as $pose) {
-            $this->assertContains($pose, $steps);
-        }
-        $this->assertContains($steps[1], ['left', 'right']);
+        $this->assertSame(['front', 'left', 'right'], $steps);
         $this->postJson('/api/face/enroll', ['challenge_id' => $c['id']])->assertUnprocessable();
         while (! $c['complete']) {
             $c = $this->step($c)->assertOk()->json();

@@ -39,7 +39,7 @@ class FaceController extends Controller
             }
             // Starting again revokes old challenges, including completed but unused ones.
             DB::table('face_challenges')->where(fn ($q) => $q->where('subject_id', $subject)->orWhere(fn ($q) => $q->whereNull('subject_id')->where('user_id', $subject)))->whereNull('consumed_at')->update(['expires_at' => now()]);
-            $steps = ['front', random_int(0, 1) ? 'left' : 'right', 'blink'];
+            $steps = $d['purpose'] === 'enroll' ? ['front', 'left', 'right'] : ['front', random_int(0, 1) ? 'left' : 'right', 'blink'];
             $state = ['templates' => [], 'hashes' => [], 'baseline' => null, 'distance' => 0];
             if ($profile) {
                 $known = json_decode(Crypt::decryptString($profile->embedding), true);

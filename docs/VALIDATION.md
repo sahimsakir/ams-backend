@@ -2,7 +2,7 @@
 
 ## Passed in this workspace
 
-- Laravel/PHP suite: **35 tests, 203 assertions**, PHP 8.4.12 with in-memory SQLite.
+- Laravel/PHP suite: **35 tests, 200 assertions**, PHP 8.4.12 with in-memory SQLite.
 - Tests cover three enrollment checks, self-enrollment and owner enrollment, old-template upgrade, removal of owner photo enrollment, enrollment required for attendance, incomplete/expired/reused/wrong-user/wrong-purpose proof rejection, frozen frames, nonce reuse, face mismatch, service failure, profile reset, duplicate attendance, overnight checkout and ISO timestamp serialization.
 - Existing leave, approval, roles and login-rate-limit tests still pass.
 - Seven Python motion-rule tests pass: direction requirements, centered/open-eye front views, open/closed/open ordering, rejected static eyes, rejected head-turn-as-blink, final front view and scale-independent eye ratios.
