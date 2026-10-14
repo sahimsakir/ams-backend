@@ -303,10 +303,11 @@ class AmsController extends Controller
         $uids = isset($d['user_id']) ? [(int) $d['user_id']] : $this->visible($r);
         $report = AttendanceReport::build($uids, $start, $end);
         foreach ($report['data'] as &$row) {
+            $row['display_status'] = $row['leave_name'] ?: ($row['status'] === 'absent' ? 'Absent' : ($row['mode'] === 'leave' ? 'Leave' : 'Present'));
             $row['can_view_photo'] = $r->user()->hasPermission('attendance.photo_view_all') || ($r->user()->hasPermission('attendance.photo_view_team') && in_array((int) $row['user_id'], Visibility::teamUsers($r->user()), true)) || ((int) $row['user_id'] === $r->user()->id && $r->user()->hasPermission('attendance.photo_view_self'));
         }
         unset($row);
-        [$report['data'],$facets] = TableFilters::array($r, $report['data'], ['name', 'work_date', 'check_in', 'check_out', 'mode', 'leave_name', 'status', 'slot_start', 'slot_end', 'working_minutes', 'actual_minutes']);
+        [$report['data'],$facets] = TableFilters::array($r, $report['data'], ['name', 'work_date', 'check_in', 'check_out', 'mode', 'leave_name', 'status', 'slot_start', 'slot_end', 'working_minutes', 'actual_minutes', 'display_status']);
         $report['facets'] = $facets;
         $page = max(1, (int) $r->query('page', 1));
         $count = count($report['data']);

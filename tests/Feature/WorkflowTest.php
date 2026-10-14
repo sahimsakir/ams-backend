@@ -295,7 +295,8 @@ class WorkflowTest extends TestCase
         Storage::disk('local')->put('private.jpg', 'photo');
         DB::table('attendances')->where('id', $id)->update(['out_photo' => 'private.jpg']);
         foreach ([$this->lead, $this->pm] as $u) {
-            $this->asUser($u)->getJson('/api/attendance')->assertJsonCount($u->id === $this->lead->id ? 1 : 0, 'data');
+            $response = $this->asUser($u)->getJson('/api/attendance?start_date=2026-10-18&end_date=2026-10-18')->assertOk();
+            $this->assertCount($u->id === $this->lead->id ? 1 : 0, collect($response->json('data'))->whereNotNull('check_in'));
             if ($u->id === $this->lead->id) {
                 $this->getJson('/api/attendance?user_id='.$this->employee->id)->assertOk();
             } else {
@@ -304,7 +305,9 @@ class WorkflowTest extends TestCase
             $this->get('/api/attendance/'.$id.'/photo/in')->assertStatus($u->id === $this->lead->id ? 200 : 404);
             $this->get('/api/attendance/'.$id.'/photo/out')->assertStatus($u->id === $this->lead->id ? 200 : 404);
         }
-        $this->asUser($this->owner)->getJson('/api/attendance')->assertJsonCount(1, 'data');
+        $response = $this->asUser($this->owner)->getJson('/api/attendance?start_date=2026-10-18&end_date=2026-10-18')->assertOk();
+        $this->assertCount(1, collect($response->json('data'))->whereNotNull('check_in'));
+        $this->assertTrue(collect($response->json('data'))->contains('display_status', 'Absent'));
     }
 
     public function test_report_metrics_clip_hours_and_include_leave_and_missing_exit(): void

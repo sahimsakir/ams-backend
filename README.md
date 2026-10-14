@@ -143,3 +143,5 @@ Update backend: `git pull --ff-only`, `docker compose build api worker`, `docker
 ### Attendance photos
 
 Migration `000011` grants the initial Team Lead role `attendance.photo_view_team`. Owners can view all attendance photos. For other roles/users, grant `attendance.view_team` plus `attendance.photo_view_team` for assigned teams, or `attendance.view_all` plus `attendance.photo_view_all` for everyone. Self photos use `attendance.photo_view_self`. The attendance table shows separate check-in/check-out photo buttons only for authorized rows with stored photos. Images are fetched with the HttpOnly authentication cookie and displayed in a responsive preview with the recorded timestamp; no public storage URL is exposed.
+
+Attendance table columns are Date, Check-in, Check-out, Hours and Status. Status is Present, Absent or the approved leave type; missing exits remain visible under Check-out and in details. Past working days without attendance/approved leave are absent, excluding dates before account creation; today and future days are not marked absent. Select a row to inspect member, date, timestamps, workplace, leave, slot, hours and permitted photo previews.

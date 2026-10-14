@@ -46,7 +46,7 @@ class AttendanceReport
                 if ($working && $key <= $today) {
                     $s['working_days']++;
                 }
-                if (! $a && ! $leave) {
+                if (! $a && ! $leave && (! $working || $key >= $today || ($u->created_at && $key < C::parse($u->created_at)->setTimezone('Asia/Dhaka')->toDateString()))) {
                     continue;
                 }
                 if (! $a && ! $working) {
@@ -58,7 +58,7 @@ class AttendanceReport
                 $in = $a ? C::parse($a->check_in, 'UTC')->setTimezone('Asia/Dhaka') : null;
                 $out = $a && $a->check_out ? C::parse($a->check_out, 'UTC')->setTimezone('Asia/Dhaka') : null;
                 $missing = $a && ! $out && $key < $today;
-                $status = $a ? ($missing ? 'missing_exit' : ($out ? 'complete' : 'checked_in')) : 'leave';
+                $status = $a ? ($missing ? 'missing_exit' : ($out ? 'complete' : 'checked_in')) : ($leave ? 'leave' : 'absent');
                 $elapsed = null;
                 $inside = null;
                 if ($a) {
@@ -89,10 +89,10 @@ class AttendanceReport
                             $s['late_departure_days']++;
                         }
                     }
-                } elseif ($key <= $today) {
+                } elseif ($leave && $key <= $today) {
                     $s['leave_days']++;
                 }
-                $rows[] = ['id' => $a ? $a->id : 'leave-'.$u->id.'-'.$key, 'user_id' => $u->id, 'has_in_photo' => (bool) ($a?->in_photo), 'has_out_photo' => (bool) ($a?->out_photo), 'name' => $u->name, 'work_date' => $key, 'check_in' => $in?->utc()->toISOString(), 'check_out' => $out?->utc()->toISOString(), 'mode' => $a ? $a->mode : 'leave', 'leave_name' => $leave?->leave_name, 'status' => $status, 'slot_start' => substr($from, 0, 5), 'slot_end' => substr($to, 0, 5), 'working_minutes' => $elapsed === null ? null : round($elapsed), 'actual_minutes' => $inside === null ? null : round($inside)];
+                $rows[] = ['id' => $a ? $a->id : $status.'-'.$u->id.'-'.$key, 'user_id' => $u->id, 'has_in_photo' => (bool) ($a?->in_photo), 'has_out_photo' => (bool) ($a?->out_photo), 'name' => $u->name, 'work_date' => $key, 'check_in' => $in?->utc()->toISOString(), 'check_out' => $out?->utc()->toISOString(), 'mode' => $a ? $a->mode : ($leave ? 'leave' : 'absent'), 'leave_name' => $leave?->leave_name, 'status' => $status, 'slot_start' => substr($from, 0, 5), 'slot_end' => substr($to, 0, 5), 'working_minutes' => $elapsed === null ? null : round($elapsed), 'actual_minutes' => $inside === null ? null : round($inside)];
             }
         }
         usort($rows, fn ($a, $b) => strcmp($b['work_date'], $a['work_date']) ?: strcmp($a['name'], $b['name']));
