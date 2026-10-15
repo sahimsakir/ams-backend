@@ -11,8 +11,8 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $password = env('OWNER_PASSWORD');
-        if (! $password || strlen($password) < 12) {
-            throw new \RuntimeException('Set OWNER_PASSWORD to at least 12 characters before seeding.');
+        if (! $password || mb_strlen($password) < 6) {
+            throw new \RuntimeException('Set OWNER_PASSWORD to at least 6 characters before seeding.');
         }
         User::firstOrCreate(['email' => env('OWNER_EMAIL', 'owner@example.com')], ['name' => 'AMS Owner', 'password' => $password, 'role' => 'owner', 'active' => true]);
         foreach (['Casual leave' => 10, 'Sick leave' => 14, 'Annual leave' => 20, 'Bereavement leave' => 3] as $name => $limit) {

@@ -264,6 +264,27 @@ class WorkflowTest extends TestCase
         $this->postJson('/api/login', ['email' => $this->employee->email, 'password' => 'secure-password-123'])->assertUnauthorized();
     }
 
+    public function test_password_minimum_is_six_for_creation_update_import_and_change(): void
+    {
+        $this->asUser($this->owner);
+        $data = ['name' => 'New User', 'email' => 'six@example.com', 'password' => '12345', 'role' => 'employee', 'active' => true];
+        $this->postJson('/api/users', $data)->assertUnprocessable()->assertJsonValidationErrors('password');
+        $data['password'] = '123456';
+        $id = $this->postJson('/api/users', $data)->assertCreated()->json('id');
+        $data['password'] = '12345';
+        $this->putJson('/api/users/'.$id, $data)->assertUnprocessable()->assertJsonValidationErrors('password');
+        $data['password'] = 'abcdef';
+        $this->putJson('/api/users/'.$id, $data)->assertOk();
+        $this->assertTrue(Hash::check('abcdef', User::findOrFail($id)->password));
+        foreach (['12345' => 422, '123456' => 200] as $password => $status) {
+            $file = UploadedFile::fake()->createWithContent('users.csv', "name,email,password\nImported,import-six@example.com,$password\n");
+            $this->post('/api/users/import', ['file' => $file], ['Accept' => 'application/json'])->assertStatus($status);
+        }
+        $this->putJson('/api/password', ['current_password' => 'secure-password-123', 'password' => '12345', 'password_confirmation' => '12345'])->assertUnprocessable()->assertJsonValidationErrors('password');
+        $this->putJson('/api/password', ['current_password' => 'secure-password-123', 'password' => '123456', 'password_confirmation' => '123456'])->assertOk();
+        $this->assertTrue(Hash::check('123456', $this->owner->fresh()->password));
+    }
+
     public function test_csv_import_is_atomic_and_owner_only(): void
     {
         $csv = "name,email,password,role,active\nNew User,new@example.com,long-password-123,employee,true\nBad,bad-email,long-password-123,employee,true\n";

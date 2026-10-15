@@ -48,7 +48,7 @@ class AmsController extends Controller
 
     public function password(Request $r)
     {
-        $d = $r->validate(['current_password' => 'required', 'password' => 'required|string|min:12|confirmed']);
+        $d = $r->validate(['current_password' => 'required', 'password' => 'required|string|min:6|confirmed']);
         abort_unless(Hash::check($d['current_password'], $r->user()->password), 422, 'Current password incorrect');
         $r->user()->update(['password' => $d['password']]);
         BrowserAuth::revokeUser($r->user()->id);
@@ -368,7 +368,7 @@ class AmsController extends Controller
     public function saveUser(Request $r, ?int $id = null)
     {
         abort_unless($r->user()->hasPermission($id ? 'users.update' : 'users.create'), 403);
-        $d = $r->validate(['name' => 'required|string|max:150', 'email' => ['required', 'email', Rule::unique('users')->ignore($id)], 'role' => ['required', Rule::exists('roles', 'slug')], 'password' => ($id ? 'nullable' : 'required').'|string|min:12', 'active' => 'required|boolean', 'designation' => 'nullable|string|max:150', 'phone' => 'nullable|string|max:50']);
+        $d = $r->validate(['name' => 'required|string|max:150', 'email' => ['required', 'email', Rule::unique('users')->ignore($id)], 'role' => ['required', Rule::exists('roles', 'slug')], 'password' => ($id ? 'nullable' : 'required').'|string|min:6', 'active' => 'required|boolean', 'designation' => 'nullable|string|max:150', 'phone' => 'nullable|string|max:50']);
         $targetRole = Role::where('slug', $d['role'])->firstOrFail();
         $existing = $id ? User::findOrFail($id) : null;
         abort_if(! $r->user()->isOwner() && ((! $existing && $targetRole->slug !== 'employee') || ($existing && $existing->role_id !== $targetRole->id) || ($existing && $existing->isOwner())), 403, 'Only Owner can change role assignments or manage an Owner.');
@@ -497,7 +497,7 @@ class AmsController extends Controller
             $row['active'] = $row['active'] ?? 'true';
             abort_unless(in_array(strtolower($row['active']), ['true', 'false', '1', '0'], true), 422, "Invalid active value on row $line.");
             $row['active'] = in_array(strtolower($row['active']), ['true', '1'], true);
-            $v = validator($row, ['name' => 'required|string|max:150', 'email' => 'required|email|max:255|unique:users', 'password' => 'required|string|min:12', 'role' => ['required', Rule::exists('roles', 'slug')], 'designation' => 'nullable|string|max:150', 'phone' => 'nullable|string|max:50']);
+            $v = validator($row, ['name' => 'required|string|max:150', 'email' => 'required|email|max:255|unique:users', 'password' => 'required|string|min:6', 'role' => ['required', Rule::exists('roles', 'slug')], 'designation' => 'nullable|string|max:150', 'phone' => 'nullable|string|max:50']);
             abort_if($v->fails(), 422, "CSV row $line: ".$v->errors()->first());
             abort_if(isset($emails[$row['email']]), 422, "Duplicate email on row $line.");
             $emails[$row['email']] = true;

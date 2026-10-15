@@ -72,7 +72,7 @@ docker compose logs --tail=100 api worker face
 
 Leave requests support emergency contact, covering person and an optional private JPG/PNG/PDF document (15 MB). Overtime supports first/last dates, total minutes (1–1440 per request), reason and a required approval document. All assigned reviewers still approve through the email workflow. Downloads require an authenticated applicant, assigned reviewer or owner.
 
-Owners can edit and delete leave types and users. Deleted types are unavailable for new requests; historical records remain. Deleted users lose tokens, team memberships and face templates. Resolve pending applications/reviews before deleting a user. Self-deletion is blocked. CSV import is create-only, atomic, up to 500 rows/2 MB: required headers `name,email,password`; optional `role,active,designation,phone`. Roles: owner,manager,pm,team_lead,employee. Passwords: 12+ characters. Active: true/false or 1/0. Duplicate emails (including archived accounts) reject the import. Users enroll faces after login.
+Owners can edit and delete leave types and users. Deleted types are unavailable for new requests; historical records remain. Deleted users lose tokens, team memberships and face templates. Resolve pending applications/reviews before deleting a user. Self-deletion is blocked. CSV import is create-only, atomic, up to 500 rows/2 MB: required headers `name,email,password`; optional `role,active,designation,phone`. Roles: owner,manager,pm,team_lead,employee. Passwords: 6+ characters. Active: true/false or 1/0. Duplicate emails (including archived accounts) reject the import. Users enroll faces after login.
 
 Update this release:
 ```bash
