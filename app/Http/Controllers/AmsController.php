@@ -11,6 +11,7 @@ use App\Services\FaceProof;
 use App\Services\TableFilters;
 use App\Services\Visibility;
 use App\Services\Workflow as W;
+use App\Services\WorkforceAnalytics;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -91,6 +92,17 @@ class AmsController extends Controller
         W::audit($r->user()->id, 'profile.updated', (string) $r->user()->id);
 
         return ['message' => 'Profile updated'];
+    }
+
+    public function analytics(Request $r)
+    {
+        $d = $r->validate(['date' => 'nullable|date_format:Y-m-d|before_or_equal:'.now('Asia/Dhaka')->toDateString(), 'month' => 'nullable|date_format:Y-m']);
+        $date = $d['date'] ?? now('Asia/Dhaka')->toDateString();
+        $month = $d['month'] ?? now('Asia/Dhaka')->format('Y-m');
+        abort_if($month > now('Asia/Dhaka')->format('Y-m'), 422, 'Select the current month or an earlier month.');
+        $report = WorkforceAnalytics::build(Visibility::users($r->user(), 'analytics'), $date, $month, $r->user()->hasPermission('analytics.view_daily'), $r->user()->hasPermission('analytics.view_monthly'));
+
+        return ['scope' => $r->user()->hasPermission('analytics.view_all') ? 'all' : ($r->user()->hasPermission('analytics.view_team') ? 'team' : 'self'), 'daily' => $r->user()->hasPermission('analytics.view_daily') ? $report['daily'] : null, 'monthly' => $r->user()->hasPermission('analytics.view_monthly') ? $report['monthly'] : null];
     }
 
     public function dashboard(Request $r)

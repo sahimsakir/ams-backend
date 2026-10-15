@@ -25,6 +25,7 @@ Route::middleware(['token', 'throttle:ams-api'])->group(function () {
     Route::get('/me', [C::class, 'me']);
     Route::post('/logout', [C::class, 'logout']);
     Route::put('/password', [C::class, 'password'])->middleware('permission:profile.change_password');
+    Route::get('/analytics', [C::class, 'analytics'])->middleware('permission:analytics.view_daily|analytics.view_monthly');
     Route::get('/dashboard', [C::class, 'dashboard'])->middleware('permission:dashboard.view');
     Route::get('/applications', [C::class, 'applications'])->middleware('permission:applications.view|applications.view_team|applications.view_all');
     Route::post('/applications', [C::class, 'apply']);
