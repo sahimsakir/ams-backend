@@ -36,19 +36,19 @@ Keep the existing `.env`, database and volumes. Do not regenerate APP_KEY, reset
 
 Every role must have a verified face profile before using workspace features. First login automatically opens a mandatory enrollment dialog. Self-enrollment has three clear prompts: look forward, look left, look right. Enrolled owners can enroll other users in person from **People → Enroll face**, after confirming identity and consent. Replacing an existing profile requires an owner reset. Older version-1 templates must upgrade through the guided flow while matching their existing template, or be reset by an owner.
 
-Attendance uses **one camera image matched against the enrolled face**:
+Attendance uses **one tap, four automatic camera frames, face matching and passive liveness**:
 
 1. Start the camera and select **Capture & check in/out**.
 2. The server requires exactly one clearly visible face and compares its encoding with that account's enrolled templates.
-3. A successful match records attendance immediately and returns the server timestamp. There is no head-turn, blinking, liveness or passive anti-spoof requirement for attendance.
+3. Successful face matching and liveness checks record attendance and return the server timestamp. Attendance requires MiniVision passive liveness on four automatic frames as well as face matching; there are no head-turn or blinking prompts.
 
 Sessions remain bound to the user, profile, action, nonce, expiry and single use. Face mismatches, invalid service responses, unavailable verification, expired proofs and duplicate attendance fail closed. Exact previously used image bytes cannot be reused; this does not detect a newly photographed copy of a printed/screen image. Photos/templates remain private, and UTC ISO timestamps are displayed in Asia/Dhaka. A missing checkout becomes a missing exit after midnight in Asia/Dhaka; it cannot be checked out the next day and does not block a new check-in.
 
-Enrollment stays at forward/left/right and still gates workspace access. The passive classifier and attendance head-turn checks were removed at the user's explicit request. `FACE_LIVE_MIN_SCORE` is obsolete. No ONNX/OpenCV dependency or anti-spoof weight download is needed.
+Enrollment stays at forward/left/right and still gates workspace access. Attendance uses MiniVision MiniFASNetV2 + MiniFASNetV1SE CPU models. Docker downloads pinned SHA-256-checked weights during build. `FACE_LIVE_MIN_SCORE` defaults to 0.8; it must be between 0.5 and 1. Head-turn checks remain limited to enrollment.
 
 ## Practical limits
 
-**Face-only attendance has no protection against presentation attacks.** A printed or screen-displayed image of the enrolled person can match and be accepted. Re-encoding or photographing an old image bypasses exact-byte replay detection. Login/profile requirements do not establish physical presence. Camera/model accuracy still needs testing on real devices; no guarantee that every genuine capture will match is made.
+**Passive liveness is not certified protection.** It can reject genuine users or accept unseen attacks. Test real people and printed/screen/video attacks on your actual cameras and lighting before relying on it. The previous classifier's false rejections are not assumed solved by this integration. Camera injection/replay is not cryptographically prevented by a browser frame sequence.
 
 For phones/tablets, follow the frontend README's trusted HTTPS setup. Production requires a real PHP server, HTTPS, backups and a same-origin gateway allowing 12 MB request bodies and 120-second upstream timeouts. Never expose the internal face service.
 
@@ -145,3 +145,13 @@ Update backend: `git pull --ff-only`, `docker compose build api worker`, `docker
 Migration `000011` grants the initial Team Lead role `attendance.photo_view_team`. Owners can view all attendance photos. For other roles/users, grant `attendance.view_team` plus `attendance.photo_view_team` for assigned teams, or `attendance.view_all` plus `attendance.photo_view_all` for everyone. Self photos use `attendance.photo_view_self`. The attendance table shows separate check-in/check-out photo buttons only for authorized rows with stored photos. Images are fetched with the HttpOnly authentication cookie and displayed in a responsive preview with the recorded timestamp; no public storage URL is exposed.
 
 Attendance table columns are Date, Check-in, Check-out, Hours and Status. Status is Present, Absent or the approved leave type; missing exits remain visible under Check-out and in details. Past working days without attendance/approved leave are absent, excluding dates before account creation; today and future days are not marked absent. Select a row to inspect member, date, timestamps, workplace, leave, slot, hours and permitted photo previews.
+
+### MiniVision attendance liveness update
+
+One tap collects four distinct JPEG frames over approximately one second, without pose instructions. Each frame must have exactly one face matching enrollment and pass the two-model ensemble (live class wins and live score >= `FACE_LIVE_MIN_SCORE`, default 0.8). The saved check-in/out photo is bound to the first verified frame. Missing/bad responses, mismatches, duplicate frames, model failures and stale proofs fail closed. Pre-update matching-only proofs are rejected; reopen the camera after upgrading. No database migration or face re-enrollment is required.
+
+Weights and source revision: `b6d5f04ad78778917853b25c778acef6d5626d15` from MiniVision Silent-Face-Anti-Spoofing, Apache-2.0; license/attribution in `face-service/minivision`. Models are loaded once and run on CPU with PyTorch 2.6 and OpenCV. Build requires GitHub weight access and CPU PyTorch packages; weights are not fetched during requests. No paid API is used. Existing HOG face boxes are used for model crops; validate this integration on target devices.
+
+Update: pull both repos, add `FACE_LIVE_MIN_SCORE=0.8` to backend `.env`, run `docker compose build face api worker`, `docker compose up -d --force-recreate face api worker`, then `docker compose exec api php artisan optimize:clear`. Restart frontend and refresh the browser. Do not delete storage volumes or change APP_KEY. First build is larger due to CPU PyTorch.
+
+Local checks: install face-service dependencies, CPU PyTorch, and `httpx`; run `python face-service/download_models.py` then `python -m unittest discover -s face-service -p 'test_*.py'`. These check weight loading, preprocessing/inference, policy, and API contracts with mocked face/PAD outcomes, not real attack accuracy. Actual Docker builds and physical-camera accuracy must be tested in the deployment environment.

@@ -180,7 +180,7 @@ class WorkflowTest extends TestCase
         Storage::fake('local');
         DB::table('face_profiles')->where('user_id', $this->employee->id)->delete();
         DB::table('face_profiles')->insert(['user_id' => $this->employee->id, 'embedding' => Crypt::encryptString(json_encode(['templates' => [array_fill(0, 128, 0.0)]])), 'verification_version' => 2, 'enrolled_by' => $this->owner->id]);
-        Http::fake(['*' => Http::response(['embedding' => array_fill(0, 128, $coordinate), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => $coordinate, 'live_score' => .99], $status)]);
+        Http::fake(['*' => Http::response(['embedding' => array_fill(0, 128, $coordinate), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => $coordinate, 'live_score' => .99, 'live' => true, 'frames_checked' => 4, 'model' => 'minivision-b6d5f04-ensemble-v1'], $status)]);
     }
 
     private function punch(string $action)
@@ -189,7 +189,13 @@ class WorkflowTest extends TestCase
         $c = $this->postJson('/api/face/challenges', ['purpose' => $action, 'consent' => true])->assertOk()->json();
         $photo = UploadedFile::fake()->image('capture.jpg');
         file_put_contents($photo->path(), random_bytes(16), FILE_APPEND);
-        $res = $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json']);
+        $frames = [$photo];
+        for ($i = 0; $i < 3; $i++) {
+            $f = UploadedFile::fake()->image('frame.jpg');
+            file_put_contents($f->path(), random_bytes(16), FILE_APPEND);
+            $frames[] = $f;
+        }
+        $res = $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo, 'frames' => $frames], ['Accept' => 'application/json']);
         if ($res->status() !== 200) {
             return $res;
         }

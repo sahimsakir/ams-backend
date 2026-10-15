@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class FaceController extends Controller
@@ -122,7 +123,7 @@ class FaceController extends Controller
     {
         $challenge = DB::table('face_challenges')->where('id', $id)->where('user_id', $r->user()->id)->first();
         abort_unless($challenge && $r->user()->hasPermission($challenge->purpose === 'in' ? 'attendance.check_in' : 'attendance.check_out'), 403);
-        $d = $r->validate(['nonce' => 'required|string', 'photo' => 'required|file|mimes:jpeg|max:1024']);
+        $d = $r->validate(['nonce' => 'required|string', 'photo' => 'required|file|mimes:jpeg|max:1024', 'frames' => 'required|array|size:4', 'frames.*' => 'required|file|mimes:jpeg|max:1024']);
 
         return DB::transaction(function () use ($r, $id, $d) {
             $uid = $r->user()->id;
@@ -134,21 +135,34 @@ class FaceController extends Controller
             $profile = DB::table('face_profiles')->where('user_id', $uid)->first();
             abort_unless($profile && $profile->verification_version >= 2 && $c->profile_hash === FaceProof::profileHash($profile), 422, 'Face profile changed. Restart the camera.');
             $hash = hash_file('sha256', $r->file('photo')->path());
+            $hashes = array_map(fn ($frame) => hash_file('sha256', $frame->path()), $r->file('frames'));
+            abort_unless(count(array_unique($hashes)) === 4 && hash_equals($hash, $hashes[0]), 422, 'Use four fresh camera frames from the same capture.');
             $reused = DB::table('attendances')->where('user_id', $uid)->where(fn ($q) => $q->where('in_capture_hash', $hash)->orWhere('out_capture_hash', $hash))->exists();
             abort_if($reused, 422, 'This capture was already used. Take a fresh camera photo.');
             $state = json_decode(Crypt::decryptString($c->state), true);
             try {
-                $response = Http::timeout(45)->withHeaders(['X-Service-Key' => config('ams.face_key')])->attach('photo', file_get_contents($r->file('photo')->path()), 'capture.jpg')->post(config('ams.face_url').'/verify-capture', ['known' => json_encode($state['known']), 'threshold' => (string) config('ams.threshold')]);
+                $request = Http::timeout(60)->withHeaders(['X-Service-Key' => config('ams.face_key')]);
+                foreach ($r->file('frames') as $i => $frame) {
+                    $request = $request->attach('frames', file_get_contents($frame->path()), "frame-$i.jpg");
+                }
+                $response = $request->post(config('ams.face_url').'/verify-capture', ['known' => json_encode($state['known']), 'threshold' => (string) config('ams.threshold'), 'live_threshold' => (string) config('ams.live_threshold')]);
             } catch (\Throwable $e) {
                 abort(503, 'Face verification unavailable. Try again.');
             }
             abort_if($response->serverError(), 503, 'Face verification unavailable. No attendance recorded.');
-            abort_unless($response->successful(), 422, 'Face not verified. Use your own clear face in good lighting.');
+            abort_unless($response->successful(), 422, 'Face or liveness not verified. Use your own live face in good lighting, without a photo or screen.');
+            $liveScore = $response->json('live_score');
+            Log::info('ams.attendance.face_verification', ['user_id' => $uid, 'live_score' => $liveScore, 'required_live_score' => config('ams.live_threshold'), 'face_distance' => $response->json('distance'), 'model' => $response->json('model')]);
+            abort_unless(is_numeric($liveScore) && is_finite((float) $liveScore) && $liveScore >= 0 && $liveScore <= 1 && $response->json('frames_checked') === 4 && $response->json('model') === 'minivision-b6d5f04-ensemble-v1', 503, 'Invalid liveness verification response.');
+            abort_unless($response->json('live') === true && $liveScore >= config('ams.live_threshold'), 422, 'Live face not verified. Use your own face in good lighting, without a photo or screen.');
             $distance = $response->json('distance');
             abort_unless(is_numeric($distance) && is_finite((float) $distance) && $distance >= 0, 503, 'Invalid face verification response.');
             abort_if($distance > config('ams.threshold'), 422, 'Face does not match your enrolled profile.');
             $state['distance'] = (float) $distance;
             $state['face_verified'] = true;
+            $state['liveness_verified'] = true;
+            $state['live_score'] = (float) $liveScore;
+            $state['liveness_model'] = 'minivision-b6d5f04-ensemble-v1';
             $state['hashes'] = [$hash];
             $photo = $r->file('photo')->store('face-challenges', 'local');
             DB::table('face_challenges')->where('id', $id)->update(['state' => Crypt::encryptString(json_encode($state)), 'photo' => $photo, 'capture_hash' => $hash, 'step' => 1, 'nonce' => Str::random(48), 'completed_at' => now(), 'updated_at' => now(), 'expires_at' => now()->addMinutes(2)]);

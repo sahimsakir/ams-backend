@@ -1,0 +1,8 @@
+MiniVision Silent-Face-Anti-Spoofing
+https://github.com/minivision-ai/Silent-Face-Anti-Spoofing
+Upstream revision: b6d5f04ad78778917853b25c778acef6d5626d15
+Copyright MiniVision; author zhuying. Licensed under Apache License 2.0.
+models.py and crop.py are unmodified upstream files renamed for local imports.
+Pretrained weights are fetched from this pinned revision with SHA-256 validation.
+AMS uses its existing face detector, preserves BGR 0–255 preprocessing, and averages
+both models' probabilities (class 1 = live). No upstream accuracy claim is adopted.

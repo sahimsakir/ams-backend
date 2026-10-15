@@ -28,7 +28,7 @@ class FaceChallengeTest extends TestCase
         config(['app.key' => 'base64:'.base64_encode(str_repeat('a', 32))]);
         Storage::fake('local');
         Http::preventStrayRequests();
-        Http::fake(fn () => Http::response($this->serviceBody ?? ['embedding' => array_fill(0, 128, 0.0), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => 0, 'live_score' => .99], $this->serviceStatus));
+        Http::fake(fn () => Http::response($this->serviceBody ?? ['embedding' => array_fill(0, 128, 0.0), 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'distance' => 0, 'live_score' => .99, 'live' => true, 'frames_checked' => 4, 'model' => 'minivision-b6d5f04-ensemble-v1'], $this->serviceStatus));
         $this->user = User::create(['name' => 'Self', 'email' => 'self@example.com', 'password' => 'secure-password-123', 'role' => 'employee', 'active' => true]);
         $this->signIn($this->user);
     }
@@ -60,7 +60,9 @@ class FaceChallengeTest extends TestCase
         $this->travel(2)->seconds();
 
         if (($c['pose'] ?? null) === 'capture') {
-            return $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => ($frames ?? $this->frames())[0]], ['Accept' => 'application/json']);
+            $frames ??= $this->frames();
+
+            return $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $frames[0], 'frames' => $frames], ['Accept' => 'application/json']);
         }
 
         return $this->post('/api/face/challenges/'.$c['id'].'/step', ['nonce' => $c['nonce'], 'frames' => $frames ?? $this->frames()], ['Accept' => 'application/json']);
@@ -243,12 +245,12 @@ class FaceChallengeTest extends TestCase
         $this->getJson('/api/users')->assertForbidden();
     }
 
-    public function test_one_matching_photo_completes_attendance_verification(): void
+    public function test_one_tap_live_capture_completes_attendance_verification(): void
     {
         $this->enroll();
         $c = $this->start('in');
         $this->assertSame(1, $c['total']);
-        $this->serviceBody = ['distance' => .1903];
+        $this->serviceBody = ['distance' => .1903, 'live_score' => .95, 'live' => true, 'frames_checked' => 4, 'model' => 'minivision-b6d5f04-ensemble-v1'];
         $this->step($c)->assertOk()->assertJsonPath('complete', true);
         $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
     }
@@ -278,19 +280,53 @@ class FaceChallengeTest extends TestCase
     {
         $this->enroll();
         $c = $this->start('in');
-        $photo = $this->frames()[0];
-        $c = $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json'])->assertOk()->json();
+        $frames = $this->frames();
+        $photo = $frames[0];
+        $c = $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo, 'frames' => $frames], ['Accept' => 'application/json'])->assertOk()->json();
         $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
         $c = $this->start('out');
-        $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo], ['Accept' => 'application/json'])->assertUnprocessable();
+        $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $photo, 'frames' => $frames], ['Accept' => 'application/json'])->assertUnprocessable();
         $this->assertDatabaseHas('attendances', ['user_id' => $this->user->id, 'check_out' => null]);
     }
 
-    public function test_legacy_classifier_score_does_not_affect_face_matching(): void
+    public function test_low_liveness_rejects_even_a_matching_face(): void
     {
         $this->enroll();
-        $this->serviceBody = ['distance' => .1903, 'live_score' => .0012, 'baseline' => ['yaw' => 0, 'pitch' => .4, 'ear' => .3], 'embedding' => array_fill(0, 128, 0.0)];
+        $this->serviceBody = ['distance' => .1903, 'live_score' => .0012, 'live' => true, 'frames_checked' => 4, 'model' => 'minivision-b6d5f04-ensemble-v1'];
+        $c = $this->start('in');
+        $this->step($c)->assertUnprocessable();
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->assertDatabaseCount('attendances', 0);
+    }
+
+    public function test_missing_liveness_and_wrong_model_fail_closed(): void
+    {
+        $this->enroll();
+        foreach ([['distance' => .1], ['distance' => .1, 'live_score' => .99, 'live' => true, 'frames_checked' => 4, 'model' => 'unknown']] as $body) {
+            $this->serviceBody = $body;
+            $this->step($this->start('in'))->assertStatus(503);
+        }
+        $this->assertDatabaseCount('attendances', 0);
+    }
+
+    public function test_duplicate_frames_and_unbound_photo_are_rejected_before_service(): void
+    {
+        $this->enroll();
+        $frames = $this->frames();
+        $c = $this->start('in');
+        $this->step($c, array_fill(0, 4, $frames[0]))->assertUnprocessable();
+        $this->post('/api/face/challenges/'.$c['id'].'/capture', ['nonce' => $c['nonce'], 'photo' => $this->frames()[0], 'frames' => $frames], ['Accept' => 'application/json'])->assertUnprocessable();
+    }
+
+    public function test_old_matching_only_proof_cannot_record_attendance(): void
+    {
+        $this->enroll();
         $c = $this->complete('in');
-        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertOk();
+        $row = DB::table('face_challenges')->where('id', $c['id'])->first();
+        $state = json_decode(Crypt::decryptString($row->state), true);
+        unset($state['liveness_verified']);
+        DB::table('face_challenges')->where('id', $c['id'])->update(['state' => Crypt::encryptString(json_encode($state))]);
+        $this->postJson('/api/attendance', ['action' => 'in', 'challenge_id' => $c['id']])->assertUnprocessable();
+        $this->assertDatabaseCount('attendances', 0);
     }
 }

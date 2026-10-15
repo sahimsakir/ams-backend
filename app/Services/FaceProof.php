@@ -32,7 +32,7 @@ class FaceProof
         DB::table('face_challenges')->where('id', $id)->update(['consumed_at' => now()]);
         $c->decoded = json_decode(Crypt::decryptString($c->state), true);
 
-        abort_if($purpose !== 'enroll' && (($c->decoded['face_verified'] ?? false) !== true || ! $c->capture_hash), 422, 'Capture an image matching your enrolled face before giving attendance.');
+        abort_if($purpose !== 'enroll' && (($c->decoded['face_verified'] ?? false) !== true || ($c->decoded['liveness_verified'] ?? false) !== true || ($c->decoded['liveness_model'] ?? null) !== 'minivision-b6d5f04-ensemble-v1' || ! $c->capture_hash), 422, 'Capture an image matching your enrolled face before giving attendance.');
 
         return $c;
     }

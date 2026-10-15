@@ -30,3 +30,5 @@ __pycache__/
 *.sqlite
 
 face-service/models/
+
+face-service/minivision/*.pth
